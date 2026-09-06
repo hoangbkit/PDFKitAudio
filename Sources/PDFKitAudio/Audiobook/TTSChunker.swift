@@ -17,24 +17,23 @@ enum TTSChunker {
         guard !normalized.isEmpty else { return [] }
 
         let maximum = configuration.maxCharacters
-        guard normalized.count > maximum else { return [normalized] }
+        let paragraphs = normalized.components(separatedBy: "\n\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
 
         if configuration.preserveParagraphs {
-            return normalized
-                .components(separatedBy: "\n\n")
+            // Paragraph preservation is semantic, not merely a fallback for long
+            // inputs. Even two short paragraphs remain distinct convenience chunks.
+            return paragraphs
                 .flatMap { paragraph in
-                    chunkParagraph(
-                        paragraph.trimmingCharacters(in: .whitespacesAndNewlines),
-                        configuration: configuration
-                    )
+                    chunkParagraph(paragraph, configuration: configuration)
                 }
                 .filter { !$0.isEmpty }
         }
 
-        return chunkParagraph(
-            normalized.replacingOccurrences(of: "\n\n", with: " "),
-            configuration: configuration
-        )
+        let compact = paragraphs.joined(separator: " ")
+        guard compact.count > maximum else { return [compact] }
+        return chunkParagraph(compact, configuration: configuration)
     }
 
     private static func chunkParagraph(
@@ -58,7 +57,8 @@ enum TTSChunker {
                 continue
             }
 
-            let candidate = current.isEmpty ? sentence : current + " " + sentence
+            let separator = current.isEmpty ? "" : separatorBetween(current, sentence)
+            let candidate = current + separator + sentence
             if candidate.count <= configuration.maxCharacters {
                 current = candidate
             } else {
@@ -96,6 +96,19 @@ enum TTSChunker {
             results.append(sentence)
         }
         return results.isEmpty ? [text] : results
+    }
+
+    private static func separatorBetween(_ left: String, _ right: String) -> String {
+        guard let last = left.last, let first = right.first else { return "" }
+        if last.isWhitespace || first.isWhitespace { return "" }
+
+        // East Asian sentence punctuation is conventionally followed directly by
+        // the next sentence without an inserted ASCII space. Foundation sentence
+        // enumeration trims its substrings, so preserve that writing convention.
+        if cjkSentenceTerminators.contains(last) || isCJK(first) {
+            return ""
+        }
+        return " "
     }
 
     private static func splitOversizedUnit(
@@ -164,7 +177,20 @@ enum TTSChunker {
             .replacingOccurrences(of: "\r", with: "\n")
     }
 
+    private static func isCJK(_ character: Character) -> Bool {
+        character.unicodeScalars.contains { scalar in
+            switch scalar.value {
+            case 0x2E80...0x9FFF, 0x3040...0x30FF, 0xAC00...0xD7AF:
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
     private static let clauseTerminators: Set<Character> = [
         ",", ";", ":", "—", "–", "，", "；", "："
     ]
+
+    private static let cjkSentenceTerminators: Set<Character> = ["。", "！", "？"]
 }
