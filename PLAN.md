@@ -4,154 +4,145 @@
 
 Make PDFKitAudio a lightweight, production-ready PDF ingestion layer for Spokio without introducing heavy document-understanding models or large runtime dependencies.
 
-Target pipeline:
+The target pipeline is:
 
-`PDF -> PDFKit native text -> selective Vision OCR fallback -> page-level normalization -> document-level cleanup -> chapters/navigation -> TTS segments`
+`PDF -> PDFKit native text -> selective Vision OCR fallback -> cleanup -> page model -> chapters -> TTS segments`
 
-The library should optimize for:
-
-- fast first usable text
-- low and predictable memory use
-- deterministic parsing results
-- correct speech order for ordinary books and documents
-- page-level provenance for playback, resume, regeneration, debugging, and future project workflows
-- graceful degradation on imperfect PDFs
-- no dependency on Spokio UI, persistence, job queues, or a specific TTS engine
-
-## Engineering principles
-
-These rules apply to every phase.
-
-1. **Native extraction first.** Never render/OCR a page if PDFKit already provides sufficiently usable text unless the caller explicitly requests OCR.
-2. **Preserve source provenance.** Do not throw away page boundaries, extraction source, or confidence before downstream objects are built.
-3. **Prefer deterministic heuristics over opaque complexity.** Lightweight, testable heuristics are preferable to adding heavy ML/layout dependencies.
-4. **Never silently lose text.** Cleanup can remove artifacts only when confidence is high. Ambiguous content should be preserved.
-5. **Keep public API small.** Internal implementation may evolve, but Spokio should need only a small number of stable entry points.
-6. **Make expensive work explicit and cancellable.** OCR and large-document work must never accidentally block the main actor.
-7. **Treat malformed PDFs as expected input.** Invalid metadata, missing outline destinations, empty pages, mixed scanned/native documents, and broken extraction order should fail locally rather than crash the whole parse.
-8. **Measure before optimizing.** Performance changes should be backed by representative fixtures/benchmarks rather than intuition.
-9. **Do not recreate Granite Docling.** Complex arbitrary layout understanding is outside this package's scope.
+The library should optimize for fast import, low memory use, correct speech order for common books/documents, and enough provenance to support playback, resume, debugging, and future project workflows.
 
 ## Non-goals
 
-- No Granite Docling, VLMs, Core ML layout models, or remote parsing services.
-- No attempt at perfect reconstruction of arbitrary multi-column/table-heavy documents.
-- No OCR-by-default when native text is usable.
-- No direct dependency on Spokio UI, storage, project models, job queue, or speech engines.
-- No persistence format owned by PDFKitAudio; the library should expose stable data that Spokio may persist in its own models.
+- Do not add Granite Docling, VLMs, Core ML layout models, or remote parsing services.
+- Do not attempt perfect reconstruction of arbitrary complex page layouts.
+- Do not make OCR the default path when PDFKit already extracts usable text.
+- Do not couple the package directly to Spokio UI, job queue, persistence, or TTS engines.
+
+## Implementation status
+
+- [x] Phase 0 - baseline and safety net
+- [x] Phase 1 - page-level extraction as the source of truth
+- [ ] Phase 2 - TOC resolution and chapter construction correctness
+- [ ] Phase 3 - multilingual, selective, configurable OCR
+- [ ] Phase 4 - audiobook-oriented document cleanup
+- [ ] Phase 5 - TTS segmentation and source mapping
+- [ ] Phase 6 - concurrency, cancellation, and progressive parsing
+- [ ] Phase 7 - platform cleanup and package polish
+- [ ] Phase 8 - Spokio integration validation
 
 ---
 
-# Phase 0 - Baseline, fixtures, and safety net
+# Engineering principles
+
+## Correctness before heuristics
+
+Prefer preserving source text and provenance over aggressive cleanup or chapter inference. A parser that occasionally leaves a harmless artifact is preferable to one that silently drops or duplicates content.
+
+## Fast path first
+
+For ordinary digital PDFs, the dominant path should remain native PDFKit extraction. OCR must be selective and lazy. No phase should introduce heavy model startup into the default import path.
+
+## Preserve provenance
+
+Every selected page text block and every generated segment should be traceable to source PDF pages. Avoid APIs that collapse provenance too early.
+
+## Deterministic output
+
+Given the same PDF and parser configuration, chapter boundaries, page identities, cleanup, and TTS segmentation should be deterministic.
+
+## Bounded work
+
+Avoid eager full-document rendering and unbounded caches. Expensive work should scale predictably with page count and should be cancellable before Spokio adopts it for bulk project workflows.
+
+## Public API restraint
+
+Keep the public surface small. Internal parser stages can evolve, but `parse(at:)`, `parse(data:)`, page/chapter output, and audiobook generation should remain straightforward for app callers.
+
+---
+
+# Phase 0 - Baseline and safety net
+
+## Status
+
+**Complete.** GitHub Actions runs the SwiftPM suite on macOS 14. The current suite includes deterministic runtime PDF fixtures and direct coverage for parser, TOC, cleaner, chunker, and model behavior.
 
 ## Objective
 
-Create enough deterministic regression coverage that every later parser change can be evaluated for correctness, text preservation, and performance.
+Establish a reliable regression suite before changing parser semantics.
 
-## Why this comes first
+## Test architecture
 
-PDF parsing bugs are often data-dependent and difficult to notice manually. A parser that appears correct on one novel can duplicate chapters, drop headers incorrectly, or trigger OCR excessively on another. The test corpus becomes the contract for the rest of the work.
+Use a SwiftPM `testTarget` with small deterministic fixtures generated locally during tests. Avoid network-hosted fixture dependencies so CI remains reproducible.
 
-## Implementation work
+Fixture categories:
 
-### 0.1 Add a proper SwiftPM test target
+- digital PDF with selectable text
+- blank-content PDF
+- malformed/non-PDF input
+- password-protected PDF
+- flat outline
+- nested outline
+- repeated outline destinations
+- scanned/image-only PDF
+- mixed native + scanned PDF
+- non-English text where deterministic
+- repeated headers/footers for later cleanup phases
 
-Update `Package.swift` with `PDFKitAudioTests` and keep tests runnable with plain `swift test` on the supported macOS version.
+Runtime-generated fixtures are preferred when Quartz/PDFKit can create the exact structure being tested. Check in binary fixtures only when a real PDF feature cannot be reproduced reliably with APIs.
 
-Organize tests by responsibility:
+## Parser invariants captured by tests
 
-- `PdfParserTests`
-- `PdfTOCParserTests`
-- `PdfTextCleanerTests`
-- `PdfOCREngineTests`
-- `TTSChunkerTests`
-- `PdfBookTests`
-- later: performance/benchmark tests kept separate from ordinary unit tests
+- invalid bytes produce `invalidPDF`
+- missing URLs produce `fileNotFound`
+- encrypted/locked PDFs produce `passwordProtected`
+- metadata title and author are retained
+- URL filename is the fallback title when PDF metadata lacks a title
+- fallback chapters are created for usable PDFs without outlines
+- digital and image-only pages can coexist in one document
+- scanned detection is based on native-text availability
+- audiobook chunks preserve selected-text order
+- flat and nested outline hierarchy is preserved
+- repeated destinations are represented as a known baseline before Phase 2 changes them
 
-### 0.2 Build a small, intentional PDF fixture corpus
+## Cleaner/chunker coverage
 
-Keep fixtures minimal so CI stays fast. Prefer generated/synthetic fixtures where practical so expected text is known exactly.
+`PdfTextCleaner` tests cover:
 
-Required fixtures:
+- null removal
+- ligature normalization
+- line-break dehyphenation
+- isolated page-number removal
+- paragraph/newline normalization
+- HTML body escaping
 
-- single-page digital text PDF
-- multi-page digital book-like PDF
-- empty valid PDF
-- malformed/non-PDF bytes
-- encrypted/password-protected PDF
-- flat TOC
-- nested TOC
-- multiple TOC items resolving to the same page
-- out-of-order TOC destinations
-- outline item with missing/unresolvable destination
-- scanned single page
-- scanned multi-page document
-- mixed native + scanned document
-- repeated running header/footer
-- numeric page numbers
-- legitimate short numeric content that must *not* be removed
-- wrapped words with true line-break hyphenation
-- legitimate semantic hyphens that must remain
-- Unicode/emoji/non-ASCII digital text
-- at least one Vietnamese scanned page if stable enough for Vision CI
-- very long paragraph / very long sentence for chunking
+`TTSChunker` tests cover:
 
-### 0.3 Capture current behavior before changing it
+- short text
+- sentence boundaries
+- long-sentence fallback splitting
+- empty-chunk avoidance
 
-For existing public APIs, write characterization tests for:
+## CI requirements
 
-- `parse(at:)`
-- `parse(data:)`
-- metadata extraction
-- chapter ordering
-- `allPlainText()`
-- `audiobookScript()`
-- current OCR mode behavior
-- current cleaner transformations
-
-Where behavior is known to be wrong, name the test clearly and mark the desired behavior in the later phase rather than locking the bug in as permanent behavior.
-
-### 0.4 Add invariants
-
-Parser-level tests should assert invariants, not only exact strings:
-
-- page indexes are zero-based and monotonic
-- chapter ranges remain within document bounds
-- generated chapter ranges are ordered
-- audiobook segment order is strictly monotonic
-- no non-empty source page disappears without an explicit documented cleanup reason
-- `allPlainText()` contains all chapter text exactly once for the default path
-- OCR confidence always remains in `0...1`
-- empty PDFs do not produce invalid ranges such as `0...0` pretending a page exists
-
-### 0.5 Document known limitations
-
-Add a short architecture/limitations section describing what PDFKitAudio intentionally does not guarantee:
-
-- perfect reading order for arbitrary multi-column layouts
-- reconstruction of tables/forms
-- extraction from unsupported embedded content
-- perfect chapter detection when no outline/headings exist
-
-This prevents later implementation work from drifting into heavy document understanding.
-
-## Quality checks
-
-- Tests must not depend on network access.
-- OCR tests should be tolerant enough to avoid OS-version flakiness while still validating that correct language/configuration paths are used.
-- Fixtures should be small enough to keep ordinary CI fast.
-- Large-document performance fixtures should not run in every unit-test invocation unless explicitly enabled.
+- run on macOS 14 because the package currently targets macOS 14 and depends on PDFKit/AppKit/Vision
+- use `swift test`
+- tests must not depend on network access
+- fixture sizes must keep ordinary CI fast
+- avoid parallel XCTest execution where PDFKit/AppKit fixture generation may be sensitive to process-level graphics state
 
 ## Exit criteria
 
-- `swift test` passes from a clean checkout.
-- Every current core type has direct test coverage.
-- Known parser bugs have reproducible fixtures.
-- The test suite can detect duplicated chapter text, wrong page provenance, excessive OCR activation, and accidental cleanup text loss.
+- `swift test` passes from a clean checkout
+- every current core type has direct test coverage
+- known parser bugs have reproducible fixtures
+- the test suite can detect duplicated chapter text, wrong page provenance, excessive OCR activation, and accidental cleanup text loss
 
 ---
 
 # Phase 1 - Page-level extraction as the source of truth
+
+## Status
+
+**Complete.** `PdfBook.pages` is now canonical, `PdfPageContent` preserves source indexes/native text/extraction source/confidence, OCR and empty page counts are page-based, `allPlainText()` is page-derived, and audiobook segments expose exact `sourcePageRange` values. CI currently passes 35 tests on macOS 14 / Swift 5.10.
 
 ## Objective
 
@@ -159,7 +150,7 @@ Replace anonymous page tuples with a durable page model and make every downstrea
 
 ## Core design
 
-Introduce a public or package-visible model similar to:
+Use:
 
 ```swift
 public struct PdfPageContent: Sendable, Identifiable {
@@ -180,87 +171,73 @@ public enum PdfExtractionSource: Sendable {
 
 Do not use a random UUID for page identity. Page index is stable and naturally maps to the source PDF.
 
-`nativeText` is useful for diagnostics and comparing OCR/native extraction quality. If memory profiling later proves this too expensive for very large documents, make retention configurable rather than deleting provenance immediately.
+`nativeText` is retained for diagnostics and for later OCR/native quality decisions. If future large-document profiling proves retention too expensive, make it configurable rather than deleting provenance immediately.
 
-## Implementation work
+## Implemented page pipeline
 
-### 1.1 Refactor extraction into an explicit page pipeline
+The parser now follows explicit page stages:
 
-Split the monolithic parser loop into focused operations:
-
-1. load `PDFPage`
+1. resolve the source `PDFPage` for an exact source index
 2. extract native text
-3. evaluate whether OCR should run
+3. evaluate the existing OCR trigger
 4. optionally OCR
 5. select native vs OCR result
 6. run page-local cleanup
-7. emit `PdfPageContent`
+7. emit one `PdfPageContent`
 
-This makes each decision directly unit-testable.
+A source page that cannot yield usable text still emits `.empty`; no page is omitted from the canonical sequence.
 
-### 1.2 Add `pages` to `PdfBook`
+## Canonical page invariants
 
-`PdfBook` should retain ordered `[PdfPageContent]` and derive:
+- parser-produced `PdfBook.pages.count == metadata.pageCount`
+- `pageIndex` is the source PDF index, not a post-transform array position
+- empty pages remain explicit placeholders so later indexes cannot shift
+- manually-created books canonicalize duplicate page indexes rather than letting later provenance lookup crash
+- pages are exposed in ascending source order
 
-- actual OCR page count
-- empty page count if useful
-- all plain text
-- chapter contents
-- segment provenance
+## Book-level semantics
 
-Keep existing chapter-centric consumers working where feasible.
+With canonical pages available:
 
-### 1.3 Fix page count semantics
+- `ocrPageCount` counts actual `.ocr` pages
+- `emptyPageCount` counts empty canonical pages
+- `totalWords` uses canonical selected page text
+- `allPlainText()` emits canonical selected page text once and in source order
+- legacy manually-created books without page models retain chapter-based compatibility behavior
 
-`metadata.pageCount` should represent the actual `PDFDocument.pageCount`, regardless of whether some page objects fail extraction.
+## Segment provenance
 
-If a page cannot be loaded, retain an empty placeholder page result rather than shifting subsequent indexes. Never let array index stop matching source PDF page index.
-
-### 1.4 Fix `ocrPageCount`
-
-Compute from pages whose `extractionSource == .ocr`, not chapters containing at least one OCR page.
-
-### 1.5 Define source ranges for chapters and segments
-
-Replace ambiguous single-page metadata with a source range where appropriate:
+`AudiobookSegment` now exposes:
 
 ```swift
 public let sourcePageRange: ClosedRange<Int>
 ```
 
-For chunks that originate from a subset of a chapter, derive the narrowest known page range rather than always using the chapter's first page.
+The previous `pageIndex` behavior remains available as a compatibility alias for the lower bound.
 
-A future enhancement may carry character offsets, but page range is the required baseline.
-
-### 1.6 Compatibility strategy
-
-Avoid unnecessary public breakage in this phase.
-
-- keep `parse(at:)` and `parse(data:)`
-- keep `chapters`
-- keep `audiobookScript()`
-- deprecate incorrect properties rather than silently changing their meaning when that could surprise downstream callers
-
-Because the repo is still early, prefer correcting clearly wrong semantics now before Spokio deeply depends on them.
+During Phase 1, chunks are deliberately bounded to individual source pages. This produces exact provenance immediately. Phase 5 may merge text across page boundaries while widening `sourcePageRange` to cover every contributing page.
 
 ## Tests
 
-Add tests proving:
+Coverage proves:
 
-- mixed native/OCR pages preserve correct indexes
-- skipped/empty pages do not shift later indexes
-- actual OCR page count is correct
-- chapter source ranges match underlying pages
-- segment source ranges do not all collapse to the chapter start
-- `allPlainText()` contains each source page's selected text exactly once in the default path
+- mixed native/OCR pages preserve source indexes
+- OCR-disabled image pages become `.empty` without shifting later indexes
+- automatic OCR records `.ocr` provenance on the scanned page
+- an empty middle page does not shift a later page from source index 2
+- actual OCR/empty page counts are correct
+- fallback chapter page ranges match underlying source pages
+- `allPlainText()` contains each source page marker exactly once
+- audiobook segments from a multi-page chapter report `0...0`, `1...1`, etc. rather than all claiming the chapter start page
+- duplicate manually-supplied page indexes are canonicalized safely
 
 ## Exit criteria
 
-- Every selected text block is traceable to its source page.
-- `PdfBook.pages.count == metadata.pageCount` for valid PDFs.
-- No page index is inferred from array position after transformations.
-- OCR page counts are correct.
-- Existing simple parse usage remains straightforward.
+- every selected text block is traceable to its source page
+- `PdfBook.pages.count == metadata.pageCount` for parser-produced valid PDFs
+- no page index is inferred from a transformed array position
+- OCR page counts are correct
+- existing simple `parse(at:)`, `parse(data:)`, chapters, and audiobook usage remain straightforward
 
 ---
 
@@ -268,7 +245,7 @@ Add tests proving:
 
 ## Objective
 
-Separate PDF navigation structure from audiobook chapter boundaries and guarantee that chapter generation never duplicates spoken page content by default.
+Separate PDF navigation structure from audiobook chapter boundaries and guarantee that default chapter generation does not duplicate spoken page content.
 
 ## Core design decision
 
@@ -318,781 +295,712 @@ If the first usable TOC destination starts after page 0 and prior pages contain 
 
 When multiple headings start on the same page:
 
-- choose one chapter boundary
-- retain all corresponding TOC nodes for navigation
-- never create zero-length/duplicate spoken chapters
+- select one audiobook boundary
+- retain all navigation entries
+- avoid zero-length or duplicate chapters
+- use deterministic title selection (prefer the highest/outermost usable level, then original outline order)
 
-### 2.6 Improve no-TOC fallback
+### 2.6 Handle malformed order
 
-Current chapter detection should become conservative and deterministic.
+Real PDFs may have outline entries that jump backward or are not in visual page order.
 
-Use a layered fallback:
+- navigation hierarchy should retain source order
+- audiobook boundaries should be normalized into monotonic page order
+- log/diagnose ignored malformed entries when practical
+- never create negative or inverted page ranges
 
-1. detect strong chapter headings near the top of pages
-2. if none found, return a small number of deterministic sections based on page count
-3. avoid pretending arbitrary 25-page blocks are semantically real chapters in metadata; label them as generated sections
+### 2.7 Fallback chapter heuristics
 
-Heading detection should support more than exactly `Chapter 1` / Roman numerals when cheap to do safely, but avoid language-specific overfitting in this phase.
+When no usable outline exists:
 
-### 2.7 Guarantee coverage exactly once
+- inspect only a small number of leading lines per page
+- detect obvious `Chapter`, `Part`, and equivalent headings conservatively
+- avoid splitting on ordinary body lines that happen to be short
+- keep the deterministic fixed-page fallback for documents with no reliable headings
 
-For the default audiobook chapter list:
-
-- every meaningful page belongs to exactly one chapter
-- no page belongs to two generated chapter ranges
-- no meaningful page between chapter boundaries disappears
+Do not add ML heading classification in this library.
 
 ## Tests
 
-Required TOC scenarios:
+Add fixtures proving:
 
-- flat unique destinations
-- nested parent/child same page
-- nested children on later pages
-- duplicate destinations
-- unsorted destination order
-- missing destination
-- out-of-range destination
-- first chapter begins after front matter
-- TOC exists but is unusable
-
-Assertions:
-
-- chapter ranges monotonic
-- no overlaps
-- no duplicates in `allPlainText()`
-- full text coverage exactly once
-- navigation hierarchy remains intact independently of audiobook chapters
+- nested outlines do not duplicate source pages in chapter output
+- parent + child entries on the same page generate one audiobook boundary
+- repeated destinations generate one chapter boundary
+- invalid destinations do not silently become page 0
+- front matter before the first TOC entry is preserved
+- malformed/backward outline order normalizes safely
+- generated chapter ranges are monotonic and non-overlapping
+- concatenating default chapters reproduces canonical page text exactly once
 
 ## Exit criteria
 
-- Nested TOCs cannot duplicate spoken text.
-- Invalid destinations never silently become page zero.
-- Default chapter ranges are monotonic, non-overlapping, and cover meaningful pages exactly once.
-- Navigation hierarchy remains available even when audiobook boundaries are simplified.
+- default audiobook chapter ranges never overlap
+- every canonical non-empty page belongs to at most one default chapter
+- front matter is not silently lost
+- TOC hierarchy remains available independently from audiobook chapter boundaries
+- nested/repeated TOC fixtures cannot duplicate spoken text
 
 ---
 
-# Phase 3 - Multilingual, selective, and configurable OCR
+# Phase 3 - Multilingual, selective, configurable OCR
 
 ## Objective
 
-Make Vision OCR reliable for multilingual scanned/mixed PDFs while ensuring native digital PDFs remain fast and avoid rendering work.
+Keep OCR lightweight while making it suitable for Spokio's multilingual use cases and reducing false OCR activation.
 
-## API design
+## Public configuration shape
 
-Replace scattered OCR parameters with one configuration type:
+Replace scattered OCR constructor parameters with a focused configuration value, while retaining convenient defaults. A target shape could be:
 
 ```swift
 public struct PdfOCRConfiguration: Sendable {
     public var mode: OCROptions
+    public var nativeTextThreshold: Int
     public var recognitionLanguages: [String]
     public var automaticallyDetectsLanguage: Bool
     public var recognitionLevel: VNRequestTextRecognitionLevel
-    public var minimumNativeCharacterCount: Int
 }
 ```
 
-If exposing Vision-specific enums publicly would couple the API too tightly to Vision, define package-owned equivalents and map them internally.
+If exposing Vision's recognition-level type in the public API creates undesirable framework coupling, wrap it in a package-owned enum.
 
-Provide a sensible `.default` tuned for Spokio's common path.
+Default behavior should preserve the lightweight fast path.
 
-## Implementation work
+## OCR language behavior
 
-### 3.1 Remove hard-coded English
+Current hard-coded `en-US` must be removed.
 
-Do not force `en-US` with automatic language detection disabled.
+Recommended policy:
 
-Desired behavior:
+- if explicit recognition languages are supplied, pass them to Vision
+- otherwise allow automatic language detection when supported and enabled
+- do not pretend metadata `detectedLanguage = "en"` is actual detection
+- keep language configuration independent from Spokio's TTS voice selection
 
-- if caller supplies explicit languages, honor them
-- otherwise allow automatic language detection where supported
-- validate/normalize requested languages against Vision support where practical
-- do not fail the entire document because one requested OCR language is unsupported
+Test Vietnamese and at least one Latin-script non-English sample if Vision CI behavior is sufficiently deterministic.
 
-### 3.2 Improve `.auto` OCR triggering
+## Auto-OCR decision policy
 
-A single `raw.count < threshold` rule is insufficient.
+The current character-count threshold is useful but too simple by itself.
 
-Use cheap signals such as:
+Keep the decision cheap. Candidate signals:
 
-- trimmed native character count
-- ratio of letters/digits to replacement/control characters
-- suspiciously low text density on a page relative to nearby pages
-- empty/near-empty extraction
+- selected native character count
+- ratio of printable/alphanumeric characters
+- suspicious replacement/control-character rate
+- whether native extraction contains only a page number/header fragment
 
-Keep the trigger conservative. Do not add expensive page rendering just to decide whether page rendering is needed.
+Do not render a page merely to decide whether it needs rendering.
 
-### 3.3 Native-vs-OCR selection policy
+A reasonable decision sequence:
 
-When OCR runs, compare candidates rather than automatically replacing native text.
+1. native extraction is empty -> OCR candidate
+2. native extraction is below configurable threshold -> OCR candidate
+3. native extraction is long and text-like -> stay native
+4. native extraction is suspicious/garbled -> OCR candidate
 
-Rules should prefer native extraction unless OCR is clearly better by signals such as:
+## Native-vs-OCR selection
 
-- native extraction nearly empty
-- OCR contains substantially more plausible text
-- native extraction has excessive invalid/control characters
+Running OCR does not automatically mean OCR output should win.
 
-Record which source won and its confidence.
+Selection should consider:
 
-### 3.4 Render only OCR candidates
+- non-empty result
+- text length/information gain
+- OCR confidence
+- obvious native-text corruption indicators
 
-Never pre-render all document pages.
+If native text is clearly good and OCR is shorter or low-confidence, preserve native text.
 
-For `.auto`, render only pages selected for OCR. For `.always`, process one page at a time and release temporary images promptly.
+Expose the selected source through `PdfPageContent.extractionSource`; optional diagnostic reason fields can remain internal unless callers need them.
 
-### 3.5 Correct image sizing
+## Rendering strategy
 
-Avoid assuming every page is US Letter.
+- render only pages selected for OCR
+- use a bounded target resolution suitable for text recognition
+- avoid retaining full-size page images after OCR
+- process one/few page images at a time so memory does not scale with full document image size
 
-Determine render size from the page bounds while preserving aspect ratio and targeting a configurable approximate DPI / maximum dimension. Cap dimensions to avoid extreme memory use on pathological page sizes.
+Do not pre-render the whole PDF.
 
-### 3.6 OCR error semantics
+## Error semantics
 
-OCR failure on one page should normally produce a page-level result rather than abort the entire document if native text exists.
+- OCR failure on a page with usable native text should fall back to native text
+- OCR failure on an image-only page should produce `.empty`, not abort the entire document by default
+- reserve document-level failure for cases where parsing cannot produce a meaningful document at all
 
-Distinguish:
-
-- OCR not attempted
-- OCR attempted and selected
-- OCR attempted but native text retained
-- OCR failed with native fallback
-- OCR failed with no text available
-
-This can be internal diagnostics initially if the public model would otherwise become too large.
-
-### 3.7 Scanned-document metadata
-
-Determine `metadata.isScanned` from actual extraction results when possible rather than relying solely on a pre-parse sample heuristic.
-
-For example, classify as scanned when a meaningful proportion of non-empty pages ultimately require OCR. Keep the existing sample heuristic only as an optimization/early hint if useful.
+Optional per-page diagnostics can identify OCR failures without blocking import.
 
 ## Tests
 
-- digital English PDF: zero OCR in `.auto`
-- digital Vietnamese PDF: zero OCR in `.auto`
-- scanned English PDF: OCR selected
-- scanned Vietnamese PDF: OCR runs without hard-coded English
-- mixed native/scanned PDF: only scanned pages OCR
-- `.never`: no OCR regardless of page content
-- `.always`: every loadable page attempts OCR
-- OCR failure with usable native text: native text survives
-- pathological page dimensions do not allocate unbounded images
-
-## Performance requirements
-
-Capture baseline and post-change metrics on representative documents:
-
-- number of pages rendered
-- OCR page count
-- total parse duration
-- peak memory where measurable
-
-The common digital-PDF path should not become materially slower because OCR capabilities improved.
+- `.never` never invokes/chooses OCR
+- `.always` evaluates OCR for every usable page
+- `.auto` avoids OCR on sufficiently good digital pages
+- `.auto` OCRs image-only pages
+- explicit languages propagate into Vision request configuration
+- automatic language detection configuration is respected
+- OCR failure preserves good native text
+- multilingual scanned fixture produces non-empty selected text
+- mixed documents report accurate `.native/.ocr/.empty` page sources
 
 ## Exit criteria
 
-- No hard-coded English-only behavior remains.
-- Mixed documents OCR only pages that need it in `.auto`.
-- Native digital documents avoid rendering in the common path.
-- One OCR failure cannot destroy otherwise usable document text.
-- OCR render dimensions are bounded and page-aspect-aware.
+- non-English scanned PDFs are not forced through English OCR
+- ordinary digital PDFs remain on native extraction
+- OCR rendering is lazy and page-scoped
+- OCR failure cannot unnecessarily destroy good native text
+- configuration stays small and caller-friendly
 
 ---
 
-# Phase 4 - Audiobook-oriented text normalization and cleanup
+# Phase 4 - Audiobook-oriented document cleanup
 
 ## Objective
 
-Remove artifacts that sound bad in speech while preserving real content and avoiding layout-model complexity.
+Remove artifacts that sound bad when spoken while staying conservative enough to avoid deleting legitimate book content.
 
-## Architecture
+## Pipeline split
 
-Split cleanup into two stages:
+Separate cleanup into:
 
-1. **page-local normalization**: safe transformations that do not require context from other pages
-2. **document-level cleanup**: repeated header/footer and cross-page heuristics that require multiple pages
+1. **page-local normalization** — safe transformations that require only one page
+2. **document-level cleanup** — transformations that require comparing multiple pages
 
-Do not mix the two; this keeps transformations testable and makes text-loss bugs easier to isolate.
+This prevents `PdfTextCleaner` from accumulating document-wide heuristics in a single raw-string function.
 
-## Implementation work
+## Page-local normalization
 
-### 4.1 Page-local safe normalization
+Retain/improve:
 
-Retain and harden:
-
-- null/control-character cleanup
-- Unicode normalization where useful
-- ligature replacement
+- null/control-character removal
+- safe Unicode/ligature normalization
 - whitespace normalization
-- soft-hyphen handling
+- line-wrap dehyphenation
+- isolated page-number filtering
 
-Avoid converting punctuation unnecessarily. For example, do not normalize an em dash merely because TTS can read it; preserve semantic punctuation unless there is a proven speech issue.
+Dehyphenation must be conservative. Do not blindly remove every `-\n`; preserve likely semantic compounds and punctuation when evidence is ambiguous.
 
-### 4.2 Conservative dehyphenation
+## Repeated header/footer detection
 
-Current `-\n -> ''` behavior is too aggressive.
+Detect candidates from a bounded number of first/last lines on each page.
 
-Only dehyphenate when evidence suggests a line-wrap split, for example:
+Suggested process:
 
-- alphabetic characters on both sides
-- preceding token is not obviously a standalone hyphenated compound
-- next line begins with lowercase when language heuristics make that meaningful
+1. normalize candidate line for comparison (trim, collapse spaces, optionally normalize digits)
+2. count occurrences by approximate vertical role (header vs footer)
+3. require recurrence across a meaningful fraction/minimum number of pages
+4. exclude long lines and paragraph-like content
+5. remove only candidate lines that meet conservative recurrence rules
 
-When uncertain, preserve the hyphen.
+Account for alternating odd/even page headers. A book may alternate title and author/chapter name.
 
-### 4.3 Repeated header/footer detection
+Never remove a line from a page merely because it appears twice in the whole book.
 
-Use a document-level pass.
+## Page numbers
 
-Candidate extraction:
+Support:
 
-- inspect first N non-empty lines and last N non-empty lines per page
-- normalize whitespace/case for comparison while retaining originals
-- ignore clearly page-specific numeric portions when computing repetition signatures
+- plain Arabic numbers
+- `Page 12`-style short markers
+- optional Roman numeral front matter when isolated
 
-Removal threshold:
+Do not remove numbers embedded in body paragraphs, dates, headings, or lists.
 
-- require the candidate to occur across a significant fraction of eligible pages
-- avoid applying to very short documents where repetition evidence is weak
-- distinguish alternating left/right headers in printed books
-- avoid removing a line merely because it repeats twice
+## Paragraph reconstruction
 
-The cleanup system should produce a set of known repeated artifact signatures and then remove only those matching lines.
+PDF native text often contains line breaks caused by visual layout rather than semantic paragraphs.
 
-### 4.4 Page-number handling
+Conservative strategy:
 
-Do not globally remove every short numeric line.
+- preserve blank-line paragraph boundaries
+- join adjacent wrapped lines when punctuation/casing suggests one paragraph
+- preserve likely headings/list items
+- do not run expensive language models
 
-Restrict page-number removal to likely header/footer zones or a proven repeated numbering pattern. Numeric content inside body text must survive.
+This logic should be separately testable from OCR.
 
-### 4.5 Paragraph reconstruction
+## Text-loss guardrails
 
-Preserve paragraph boundaries where PDFKit provides useful line breaks.
+For every cleanup stage:
 
-For book-like text, join soft line wraps within a paragraph while retaining blank-line paragraph separation. Avoid turning the whole page into one paragraph.
+- make transforms deterministic
+- keep optional debug statistics (characters/lines removed)
+- reject or disable a heuristic if it removes an implausibly large share of document text
+- tests should compare key markers before/after cleanup
 
-Keep this heuristic conservative because poetry, code, and lists intentionally use line breaks.
-
-### 4.6 Cleanup configuration
-
-Introduce options for potentially risky transforms:
-
-- dehyphenation
-- repeated header/footer removal
-- page number removal
-- paragraph line joining
-
-Provide a default tuned for audiobook narration, but let callers choose a minimally transformed mode for debugging or specialized content.
-
-### 4.7 Diagnostics for removed artifacts
-
-For tests/debug builds, make it possible to inspect what was removed (e.g. repeated-header signatures) without exposing large debug payloads in the normal public API.
-
-This is important when a user reports missing text.
+A configurable cleanup policy can allow Spokio to choose conservative/default behavior.
 
 ## Tests
 
-- repeated book title header removed
-- alternating author/book headers removed
-- legitimate repeated body phrase retained
-- page number in footer removed
-- year/section number in body retained
-- wrapped `exam-\nple` becomes `example`
-- legitimate `well-\nknown` style cases handled conservatively
-- poetry/list line breaks not aggressively collapsed
-- cleanup does not reduce document text by an implausibly large percentage without explicit fixture expectation
+- repeated identical headers
+- alternating odd/even headers
+- repeated footers
+- page numbers only
+- legitimate repeated chapter title inside body content is preserved
+- hyphenated compounds vs line-wrap hyphenation
+- paragraphs spanning visual lines
+- bullet/list lines preserved
+- cleanup cannot remove unique page markers
 
 ## Exit criteria
 
-- Common running headers/footers stop appearing in TTS output.
-- Cleanup is deterministic.
-- No transform silently drops large content blocks.
-- Riskier cleanup behaviors can be disabled independently.
+- common book PDFs no longer speak repeated headers/footers/page numbers
+- canonical body content survives cleanup exactly once
+- cleanup remains linear/near-linear and lightweight
+- risky transforms can be disabled/configured
 
 ---
 
-# Phase 5 - TTS segmentation and precise source mapping
+# Phase 5 - TTS segmentation and source mapping
 
 ## Objective
 
-Produce natural, stable, engine-agnostic text chunks suitable for Spokio generation while retaining enough provenance to navigate back to source pages.
+Produce robust, deterministic speech chunks with precise source provenance while remaining engine-agnostic.
 
-## Design principles
+## Segmentation architecture
 
-- Chunking belongs in PDFKitAudio only as generic text segmentation, not engine-specific token budgeting.
-- Prefer semantic boundaries before hard limits.
-- Never split Swift `String` using assumptions that can corrupt extended grapheme clusters.
-- Segment identity should be deterministic for the same parsed input/configuration where practical.
+Move from returning bare `[String]` internally to a segment candidate structure that can retain provenance through splitting.
 
-## Implementation work
+Conceptually:
 
-### 5.1 Separate sentence boundary detection from chunk packing
+```swift
+struct TextSpan {
+    let text: String
+    let sourcePageRange: ClosedRange<Int>
+}
+```
 
-Implement two concepts:
+Final `AudiobookSegment` is then created from spans rather than trying to infer the page after text has already been concatenated and split.
 
-1. split text into candidate semantic units
-2. pack units into chunks up to configured limits
+## Boundary preferences
 
-This makes sentence logic testable independently from max-length behavior.
-
-### 5.2 Prefer boundary hierarchy
-
-When packing chunks, prefer in order:
+In order:
 
 1. chapter boundary
 2. paragraph boundary
 3. sentence boundary
-4. clause/punctuation boundary for very long sentences
+4. clause/punctuation boundary where practical
 5. whitespace boundary
-6. grapheme-safe hard split only as the final fallback
+6. Unicode-safe hard boundary as last resort
 
-### 5.3 Improve sentence detection
+Never split by integer offsets that assume Swift `String` uses byte/UTF-16 indexing.
 
-Avoid splitting naïvely after every period.
+## Sentence handling
 
-Cover common cases:
+Improve beyond `.`, `!`, and `?` while avoiding an oversized NLP dependency.
 
-- abbreviations (`Mr.`, `Dr.`, `e.g.`)
+Consider:
+
+- common abbreviations (`Mr.`, `Dr.`, `e.g.`)
 - decimal numbers
 - ellipses
-- quoted dialogue punctuation
+- dialogue punctuation/quotes
 - Unicode sentence punctuation
 
-Do not attempt a full NLP sentence parser if Foundation linguistic APIs or simple deterministic rules are sufficient.
+Foundation linguistic APIs may be evaluated if available/reliable on supported platforms, but deterministic behavior is more important than cleverness.
 
-### 5.4 Track source provenance during chunking
+## Cross-page chunks
 
-Do not concatenate an entire chapter and then lose page boundaries before chunking.
+Once page provenance exists, chunks may span page boundaries when it improves speech continuity.
 
-Feed page-associated text units into the segmenter so each `AudiobookSegment` can expose:
+When merging spans:
 
-- chapter index/title
-- segment order
+- preserve a page break as a soft boundary
+- compute `sourcePageRange` as first contributing page through last contributing page
+- never reorder source spans
+- do not merge across chapter boundaries
+
+## Size policy
+
+Keep character-limit support for current Spokio engines, but design around a strategy type so future engines can use word/token/time-based budgets.
+
+Avoid an API that hard-codes one specific TTS model's token accounting into PDFKitAudio.
+
+## Deterministic IDs
+
+Current chapter UUID-derived segment IDs are not stable between parses.
+
+Introduce deterministic identity based on stable inputs such as:
+
+- chapter order/stable chapter identity
+- segment order within chapter
 - source page range
-- text
-- confidence aggregated from contributing pages
 
-If a chunk crosses a page boundary, record the true range.
-
-### 5.5 Deterministic segment IDs
-
-Avoid IDs built from random chapter UUIDs if Spokio may use them for regeneration/resume.
-
-Prefer deterministic identity derived from stable inputs such as chapter order + segment order + source range, optionally with a short content hash if needed.
-
-### 5.6 Configurable segmentation policy
-
-Use a configuration struct rather than proliferating method parameters:
-
-- max characters
-- preferred minimum characters (optional)
-- paragraph preference
-- sentence preference
-
-Keep character limits for now. Do not introduce model-specific token counting into this package.
+Do not hash full user text unless there is a concrete need; simple deterministic structural IDs are easier to reason about.
 
 ## Tests
 
-- ordinary prose
-- very long sentence
-- very long unbroken token
+- multi-paragraph chapter
+- long sentence exceeding maximum
 - abbreviations
-- decimals
-- dialogue/quotes
-- emoji and composed Unicode characters
-- CJK/no-space text where possible
-- chunk crossing page boundary
-- stable output across repeated parses with same config
-- no empty chunks
-- concatenating segment texts (with documented separator normalization) preserves source text
+- decimal numbers
+- quoted dialogue
+- emoji/non-Latin Unicode
+- cross-page paragraph
+- empty pages between text pages
+- stable segment ordering and IDs across repeated parses
+- concatenated segments reproduce selected canonical text modulo expected whitespace normalization
 
 ## Exit criteria
 
-- Segments are natural enough for audiobook generation on normal prose.
-- No malformed Unicode slicing is possible.
-- Every segment has accurate source page provenance.
-- Segment order and identity are deterministic for identical input/configuration.
+- no malformed Unicode splits
+- no empty segments
+- source ranges cover every contributing page
+- repeated parse produces stable segmentation
+- chunk size constraints are respected
+- segmentation remains independent from a particular TTS engine
 
 ---
 
-# Phase 6 - Async API, cancellation, progress, and bounded resource use
+# Phase 6 - Concurrency, cancellation, and progressive parsing
 
 ## Objective
 
-Make large PDF imports responsive and cancellable in Spokio while keeping concurrency implementation inside the parsing library.
+Make large and bulk PDF imports responsive without coupling PDFKitAudio to Spokio's job system.
 
-## Public API direction
+## Public async API
 
-Prefer an async API like:
+Add an async API alongside the synchronous compatibility path, for example:
 
 ```swift
-public func parse(
-    at url: URL,
-    progress: (@Sendable (PdfParseProgress) -> Void)? = nil
-) async throws -> PdfBook
+public func parse(at url: URL) async throws -> PdfBook
 ```
 
-Keep synchronous methods temporarily for compatibility if useful, implemented through shared core logic rather than maintaining two parsers.
+Avoid ambiguous overload ergonomics if Swift call sites become confusing; a distinct name such as `parseAsync` is acceptable if necessary.
 
-## Implementation work
+The synchronous API may internally share the same pure extraction helpers rather than one wrapping the other with blocking constructs.
 
-### 6.1 Define progress semantics
+## Progress
 
-Progress should be based on meaningful stages and page counts, not arbitrary percentages.
-
-Possible model:
+Expose lightweight structured progress, e.g.:
 
 ```swift
-public struct PdfParseProgress: Sendable {
-    public let stage: Stage
-    public let completedPages: Int
-    public let totalPages: Int
+enum PdfParsingStage {
+    case loading
+    case extracting
+    case ocr
+    case buildingChapters
+    case cleaning
+}
+
+struct PdfParsingProgress {
+    let stage: PdfParsingStage
+    let completedPages: Int
+    let totalPages: Int
 }
 ```
 
-Stages may include:
+Progress requirements:
 
-- loading metadata/outline
-- extracting pages
-- OCR
-- document cleanup
-- building chapters
-- segment preparation if parsing owns it
+- monotonic completed-page count within a stage
+- no callbacks after completion/cancellation
+- avoid high-frequency UI spam; at most page-level updates are sufficient
+- caller decides which actor/UI context handles progress
 
-Do not emit extremely frequent progress callbacks that create UI overhead.
+Use `AsyncStream` or a callback only if the resulting API remains straightforward. Do not add a bespoke reactive framework dependency.
 
-### 6.2 Cooperative cancellation
+## Cancellation
 
 Check cancellation:
 
-- before each page
-- before expensive rendering
-- before Vision OCR
-- between major document-level passes
+- before starting each page
+- before expensive page rendering
+- immediately after OCR returns
+- before chapter/document-wide post-processing
 
-Throw `CancellationError` without converting it into a generic parse error.
+Vision requests should be cancelled if practical. If an individual synchronous system operation cannot be interrupted, cancellation should take effect before the next expensive step.
 
-### 6.3 Actor/thread safety
+Cancellation should throw `CancellationError` rather than a package-specific generic parsing error.
 
-Audit PDFKit behavior carefully instead of assuming `PDFDocument`/`PDFPage` are freely sendable.
+## Thread/actor safety
 
-Prefer confining document access to one parsing executor/task rather than parallelizing page extraction immediately.
+Audit PDFKit and AppKit object usage carefully.
 
-Remove `@unchecked Sendable` where possible. If it remains, document the invariant that makes it safe.
+- do not assume `PDFDocument`/`PDFPage` are freely Sendable
+- keep document/page access on a controlled execution context if required
+- move immutable extracted strings/page models across concurrency boundaries, not live PDFKit objects
+- remove `@unchecked Sendable` where a safer design can express ownership
 
-### 6.4 Avoid eager large intermediates
+This is more important than maximizing parallelism.
 
-Process one page at a time for extraction/OCR.
+## Parallelism policy
 
-Release rendered images after each OCR request. Avoid storing thumbnails or TIFF representations unless they are part of returned data.
+Do not OCR many high-resolution pages concurrently by default; memory spikes matter more than theoretical throughput.
 
-Evaluate whether storing both native and cleaned text causes material memory pressure for large PDFs. If so, make raw text retention optional after diagnostics are mature.
+Start with sequential or tightly bounded OCR concurrency. Benchmark before increasing it.
 
-### 6.5 Cover image generation
+Native extraction is already fast enough that aggressive page parallelism may not provide meaningful value.
 
-Cover thumbnail generation should not unnecessarily block first text extraction or allocate oversized buffers.
+## Memory strategy
 
-Consider making cover extraction optional/configurable or performing it as a cheap bounded operation.
+- render only the page currently being OCR'd (or a very small bounded batch)
+- release image intermediates after OCR
+- avoid retaining duplicate chapter + full-page + segment text copies where measurable
+- use autorelease pools around repeated AppKit/PDFKit image work if profiling indicates benefit
 
-### 6.6 Progressive page delivery (evaluate, don't force)
+Consider optional omission of `nativeText` only after measuring real large PDFs.
 
-Consider an `AsyncSequence<PdfPageContent>` only if Spokio can materially benefit from starting downstream generation before the entire PDF is parsed.
+## Progressive output
 
-Do not add this abstraction unless it provides real workflow value; a clean async whole-document API is preferable to premature complexity.
+Evaluate, but do not automatically expose, page streaming.
 
-## Performance validation
+A progressive page stream is useful if Spokio wants to begin planning/generating speech before an entire 1000-page PDF finishes parsing. However, do not complicate Phase 6's main API unless there is a real integration benefit.
 
-Create a repeatable benchmark harness using representative PDFs, recording:
+Potential later shape:
 
-- total parse time
-- time to first extracted page
-- pages/second native path
-- pages/second OCR path
-- number of rendered pages
-- peak resident memory where practical
-- cancellation latency
+```swift
+AsyncThrowingStream<PdfPageContent, Error>
+```
 
-Benchmark at least:
+Chapter construction still requires enough global context to finalize TOC/document cleanup.
 
-- ~20-page digital PDF
-- ~300-page digital book
-- mixed OCR/native PDF
-- ~300-page scanned document if fixture size/repository policy permits local-only benchmark data
+## Tests
+
+- cancellation before parse
+- cancellation during multi-page extraction
+- progress reaches total pages
+- no progress after cancellation
+- async output equals synchronous output for deterministic digital fixtures
+- repeated large-ish fixture does not deadlock
+- actor/thread sanitizer review if practical
 
 ## Exit criteria
 
-- Parsing can be called asynchronously without UI blocking.
-- Cancellation normally stops within the current page/OCR operation rather than after the whole document.
-- Progress is stable and meaningful enough for Spokio UI.
-- Memory growth is bounded and does not include all rendered page images simultaneously.
-- No concurrency change introduces nondeterministic chapter/text ordering.
+- Spokio can import without blocking its main actor
+- parsing can be cancelled cooperatively
+- progress can drive project/job UI
+- resource usage stays bounded
+- concurrency design does not rely on unchecked PDFKit Sendability assumptions
 
 ---
 
-# Phase 7 - Platform support and public API hardening
+# Phase 7 - Platform cleanup and package polish
 
 ## Objective
 
-Make PDFKitAudio a clean reusable package for Spokio targets, with minimal UI-specific baggage and stable semantics.
+Make the package reusable across intended Spokio targets and reduce presentation/application concerns inside the parser.
 
-## Implementation work
+## iOS portability
 
-### 7.1 Evaluate iOS support deliberately
+Audit all `AppKit` dependencies:
 
-Current AppKit usage should be isolated behind platform-specific helpers.
+- cover thumbnail encoding
+- PDF OCR page rendering
+- image conversion
+- demo-specific UI
 
-Use conditional compilation only at the narrow image-conversion/rendering boundary. Avoid duplicating parser logic for macOS/iOS.
+Prefer Core Graphics/ImageIO or small platform adapters where practical.
 
-If all required PDFKit/Vision behavior is available and tested, update `Package.swift` to support the minimum Spokio iOS version.
+Add iOS to `Package.swift` only after the package builds/tests cleanly there. Do not claim iOS support simply because PDFKit/Vision exist on iOS.
 
-Do not lower deployment targets merely for theoretical reuse if doing so adds compatibility complexity Spokio does not need.
+Suggested minimum should match Spokio's actual deployment target rather than choosing an arbitrary low version.
 
-### 7.2 Remove presentation concerns from core models
+## Remove presentation concerns
 
-`htmlPreview` is UI/presentation output and does not belong in a parsing core unless there is a strong demonstrated consumer.
+`htmlPreview` and HTML styling are presentation-layer behavior.
 
-Preferred direction:
+Options in preference order:
 
-- remove or deprecate HTML generation from `PdfChapter`
-- provide a separate formatter/helper if the demo still needs HTML
+1. remove HTML generation from the parsing core if Spokio does not need it
+2. move it into a separate helper/presentation module
+3. if retained, correctly escape title and metadata as well as text
 
-If HTML remains anywhere, escape title/metadata and body text consistently.
+The parser's durable output should be structured text/provenance, not pre-styled HTML.
 
-### 7.3 Review model mutability
+## Model immutability
 
-Properties that are computed during parsing and should not change afterward should be `let`.
+Review mutable public properties on `PdfChapter`, `PdfMetadata`, and TOC types.
 
-Avoid models that expose mutable cached values (`wordCount`, `readingTimeMinutes`) which can drift out of sync with mutable `plainText`.
+Prefer immutable values unless mutation is a deliberate supported workflow. Derived metrics such as word counts should ideally be computed or initialized consistently so callers cannot create stale combinations.
 
-Either:
+## Stable identities
 
-- make source text immutable and derived properties computed, or
-- encapsulate mutation so invariants are maintained
+Replace random UUID identities where persisted/regenerated models benefit from stable IDs:
 
-Prefer immutable value types.
+- pages: page index already solves this
+- TOC: outline path
+- chapters: deterministic boundary/order identity
+- segments: deterministic chapter/segment identity
 
-### 7.4 Stabilize identities
+## Errors and diagnostics
 
-Replace random UUID identities for deterministic source-derived objects where they provide persistence/regeneration value:
+Separate fatal parse errors from recoverable page diagnostics.
 
-- pages: page index
-- TOC nodes: outline path
-- chapters: chapter order + source range / stable boundary key
-- segments: deterministic segment key
-
-### 7.5 Error model cleanup
-
-Review `PdfError` cases against actual parser behavior.
-
-Distinguish errors that should abort parsing from recoverable page-level diagnostics.
-
-Document expected behavior for:
+Fatal examples:
 
 - file missing
-- invalid bytes
-- encrypted/locked PDF
-- zero-page PDF
-- page extraction failure
-- OCR failure
-- unsupported operation
-- cancellation
+- unreadable/not a PDF
+- locked/password protected without password support
 
-Remove unused error cases rather than leaving misleading API surface.
+Recoverable examples:
 
-### 7.6 Configuration consolidation
+- one page OCR failure
+- unresolved outline destination
+- empty source page
 
-By this phase, parser options may include OCR, cleanup, and output/provenance preferences.
+Avoid enum cases that are defined but never meaningfully used.
 
-Consolidate them into one stable top-level configuration object rather than growing the initializer indefinitely:
+## Documentation
 
-```swift
-public struct PdfParserConfiguration: Sendable {
-    public var ocr: PdfOCRConfiguration
-    public var cleanup: PdfCleanupConfiguration
-    public var retainNativeText: Bool
-}
-```
+README should include:
 
-Provide a strong default so common usage remains:
+- installation
+- fastest native-only parse
+- default selective OCR parse
+- explicit OCR configuration
+- access pages/chapters/TOC
+- generate TTS segments
+- known limitation: complex reading order/multi-column layouts
+- statement that parsing is on-device/local
 
-```swift
-let book = try await PdfParser().parse(at: url)
-```
-
-### 7.7 README and API documentation
-
-Document:
-
-- common native parsing path
-- OCR behavior
-- known limitations
-- cancellation/progress
-- page/chapter/segment provenance
-- recommended Spokio-style TTS ingestion
-
-Make clear that the package is optimized for lightweight audiobook/text extraction rather than full document-layout reconstruction.
+Do not market the library as arbitrary document understanding.
 
 ## Exit criteria
 
-- Core package contains no unnecessary UI formatting concerns.
-- Public models are internally consistent and mostly immutable.
-- Parser configuration is coherent rather than parameter-heavy.
-- Supported platforms are explicit and tested.
-- Public API can reasonably be tagged/versioned without immediate redesign.
+- supported platforms are explicit and verified
+- public API has no accidental presentation coupling
+- stable model identity exists where useful
+- errors have clear semantics
+- README reflects real capabilities/limitations
 
 ---
 
-# Phase 8 - Spokio integration validation and release readiness
+# Phase 8 - Spokio integration validation
 
 ## Objective
 
-Validate the hardened library against the actual Spokio project workflow and establish objective release criteria before depending on it in production.
+Prove the hardened package against the real Spokio project workflow before treating it as the primary PDF ingestion path.
 
 ## Integration strategy
 
-Integrate the PR branch or a prerelease tag into a dedicated Spokio development branch. Keep the dependency pinned during validation so parser behavior cannot change underneath app testing.
+Use a pinned branch/commit during development, then tag a stable PDFKitAudio version once validation passes.
 
-PDFKitAudio should return parsed data only. Spokio remains responsible for:
+Keep Spokio responsibilities outside this library:
 
-- project lifecycle
-- persistence
-- job queue orchestration
+- project/job persistence
+- queue scheduling
 - TTS engine selection
-- audio generation
-- retry/UI behavior
+- audio output paths
+- retry policy for generation jobs
+- user-facing progress/error UI
 
-## Real-world corpus
+PDFKitAudio should return structured parsed content and parsing progress only.
 
-Use representative user-style documents, not only synthetic fixtures:
+## Validation corpus
 
-- ordinary novel with a clean text layer
-- exported ebook-style PDF with TOC
-- nested-outline PDF
-- scanned English book
-- scanned Vietnamese book
-- mixed scanned/native document
-- large 300+ page book
-- PDF with repeating headers/footers
-- PDF with no outline
-- intentionally difficult multi-column academic paper to confirm graceful limitation behavior
+Test a curated local corpus containing at minimum:
 
-Do not commit copyrighted/private test documents to the public repository. Keep a local/internal benchmark corpus where necessary and document expected characteristics rather than contents.
+### Digital books
 
-## Metrics to capture
+- normal novel with TOC
+- novel without TOC
+- deeply nested TOC
+- front matter before Chapter 1
 
-For each validation document record:
+### Scans
 
-### Correctness
+- clean English scan
+- Vietnamese scan
+- mixed native + scanned book
+- low-quality scan to exercise OCR failure/fallback behavior
 
-- page count
-- generated chapter count
-- duplicated text occurrences
-- missing meaningful text
-- OCR pages selected
-- wrong OCR/native source choices
-- header/footer artifacts remaining
-- chapter boundary quality
-- segment/page provenance correctness
+### Layout stress cases
 
-### Performance
+- two-column academic paper
+- magazine-like layout
+- tables
+- image-heavy document
 
-- total import duration
-- time to first usable text if available
-- peak memory
-- rendered/OCR page count
+These stress cases establish documented limitations; they do not automatically justify adding Granite Docling back into the default path.
+
+### Scale
+
+- ~100 pages
+- ~500 pages
+- 1000+ pages if practical
+
+## Measurements
+
+Record:
+
+- total parse time
+- native extraction time
+- OCR page count and OCR time
+- peak memory where practical
+- pages/sec native path
+- duplicated text incidents
+- missing text incidents
+- chapter count/boundary quality
+- segment count
 - cancellation responsiveness
 
-### Speech quality proxy
+Separate digital and scanned metrics; averaging them together hides OCR cost.
 
-Manually inspect/listen to representative generated segments for:
+## Quality sampling
 
-- broken sentence boundaries
-- repeated page headers
-- spoken page numbers
-- bad line-wrap joins
-- duplicated chapter content
-- clearly wrong reading order
+For representative books, manually inspect/listen to:
 
-## Regression budget
+- beginning/front matter
+- first chapter transition
+- middle chapter transition
+- last chapter
+- pages with headers/footers
+- page-boundary sentences
+- OCR pages
 
-Define concrete release gates after baseline measurements are available.
+Speech quality matters more than visually recreating the PDF.
 
-At minimum:
+## Performance targets
 
-- digital text PDFs should remain fast and avoid OCR
-- no duplicated chapter text in known TOC fixtures
-- no page provenance mismatches in regression corpus
-- no known large-text-loss cleanup bug
-- large digital books stay within a reasonable memory envelope on supported Macs
-- OCR is invoked only where expected in `.auto`
+Do not invent strict numbers before baseline measurements, but establish release gates from measured Phase 8 data.
 
-Avoid inventing arbitrary millisecond/MB targets before benchmarks exist. Record the baseline first, then set thresholds relative to supported hardware and Spokio UX requirements.
+Desired characteristics:
 
-## Failure handling validation
+- digital PDFs feel near-immediate relative to TTS generation time
+- no model initialization/download
+- memory does not scale as if every page were rendered at once
+- OCR cost scales mainly with pages that actually need OCR
+- cancellation takes effect before substantial additional pages are processed
 
-Verify Spokio experience for:
+## Spokio release gate
 
-- invalid PDF
-- encrypted PDF
-- cancelled parse
-- OCR failure on a subset of pages
-- PDF containing no usable text
+Before replacing any existing parser path:
 
-The app should be able to distinguish a recoverable warning from a fatal import failure based on PDFKitAudio output/errors.
+- no known duplicate-page/chapter bug
+- no incorrect segment provenance bug
+- multilingual OCR configuration verified
+- large digital PDF import is stable
+- bulk project cancellation is stable
+- known complex-layout limitations documented
+- parser version pinned/tagged
 
-## Final library release checklist
+## Fallback policy
 
-Before tagging a stable version for Spokio:
+Do not silently route difficult PDFs to Granite Docling in production during this project.
 
-- all unit/regression tests green
-- README/API docs current
-- no known text duplication bug
-- no hard-coded English OCR behavior
-- async cancellation/progress validated
-- public API reviewed for naming/semantics
-- changelog/release notes describe behavior changes
-- Spokio pinned-integration smoke test passes
+If PDFKitAudio detects low-quality extraction, Spokio may surface a warning such as "This PDF has a complex layout; extracted reading order may be imperfect." A separate advanced parser can be evaluated later as an explicit user choice if real demand justifies its cost.
 
 ## Exit criteria
 
-- Common PDFs reach usable TTS text quickly with no model startup cost.
-- Known nested-TOC duplication, OCR language, provenance, and cleanup issues are resolved.
-- Difficult layouts degrade predictably rather than causing crashes or catastrophic text loss.
-- Performance is acceptable for Spokio's supported Macs and intended project workflow.
-- PDFKitAudio is ready for a stable version tag and direct Spokio dependency.
+- representative Spokio PDFs import quickly without heavy model startup
+- user can cancel/progress large imports
+- generated audio does not contain known systematic duplicate header/page/chapter artifacts
+- page/chapter/segment provenance is trustworthy
+- performance and known limitations are documented with measured data
 
 ---
 
-# Recommended implementation sequence
+# Recommended implementation order
 
-1. **Phase 0 - Baseline and tests**
-2. **Phase 1 - Page model and provenance**
-3. **Phase 2 - TOC/chapter correctness**
-4. **Phase 3 - Multilingual selective OCR**
-5. **Phase 4 - Audiobook cleanup**
-6. **Phase 5 - TTS segmentation/provenance**
-7. **Phase 6 - Async, cancellation, progress, memory**
-8. **Phase 7 - Platform/API hardening**
-9. **Phase 8 - Spokio validation and release**
+1. Phase 0 - tests ✅
+2. Phase 1 - page model/provenance ✅
+3. Phase 2 - TOC correctness
+4. Phase 3 - multilingual OCR
+5. Phase 4 - document-level cleanup
+6. Phase 5 - TTS segmentation
+7. Phase 6 - async/cancellation/progress
+8. Phase 7 - platform/API polish
+9. Phase 8 - Spokio validation
 
-## Integration checkpoints
-
-Do not wait until Phase 8 for the first Spokio experiment.
-
-- **After Phase 2:** verify digital PDF import + chapter correctness in a disposable Spokio branch.
-- **After Phase 4:** verify real-world book cleanup and multilingual scanned import.
-- **After Phase 6:** verify large-document UX, progress, cancellation, and memory behavior.
-- **After Phase 8:** pin/tag the production dependency.
-
-## Highest-priority path
-
-Phases 0-3 are the minimum correctness foundation before PDFKitAudio should become Spokio's primary PDF parser.
-
-Phase 4 is the highest-value speech-quality improvement.
-
-Phases 5-6 make the integration production-grade for bulk/project workflows.
-
-Phase 7 should stabilize the API only after real implementation pressure has clarified what Spokio actually needs.
-
-Phase 8 is the release gate, not a place to discover basic architectural flaws for the first time.
+Phases 0-3 form the minimum correctness foundation before PDFKitAudio should become Spokio's primary PDF parser. Phase 4 provides the biggest direct speech-quality improvement. Phases 5-6 make the package suitable for large and bulk project workflows.
