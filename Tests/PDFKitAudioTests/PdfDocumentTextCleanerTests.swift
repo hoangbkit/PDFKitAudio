@@ -58,6 +58,21 @@ final class PdfDocumentTextCleanerTests: XCTestCase {
         XCTAssertEqual(occurrences(of: "Important Notice", in: combined), 2)
     }
 
+    func testTwoPageConsecutiveYearsAreNotMistakenForPagination() {
+        let pages = [
+            page(0, text: "2024\nFirst year body."),
+            page(1, text: "2025\nSecond year body.")
+        ]
+
+        let cleaned = PdfDocumentTextCleaner.clean(
+            pages,
+            configuration: .audiobookDefault
+        )
+
+        XCTAssertTrue(cleaned[0].text.contains("2024"))
+        XCTAssertTrue(cleaned[1].text.contains("2025"))
+    }
+
     func testLegitimateStandaloneYearsAndNumbersArePreserved() {
         let pages = (0..<5).map { index in
             page(
