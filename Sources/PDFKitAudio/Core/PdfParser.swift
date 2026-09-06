@@ -6,23 +6,33 @@ public final class PdfParser: @unchecked Sendable {
     typealias OCRRecognizer = (PDFPage, PdfOCRConfiguration) -> PdfOCREngine.OCRResult?
 
     public let ocrConfiguration: PdfOCRConfiguration
+    public let cleanupConfiguration: PdfCleanupConfiguration
     private let ocrRecognizer: OCRRecognizer
 
     /// Backward-compatible initializer for existing callers.
-    public init(ocrMode: OCROptions = .auto, ocrThreshold: Int = 60) {
+    public init(
+        ocrMode: OCROptions = .auto,
+        ocrThreshold: Int = 60,
+        cleanupConfiguration: PdfCleanupConfiguration = .audiobookDefault
+    ) {
         let configuration = PdfOCRConfiguration(
             mode: ocrMode,
             nativeTextThreshold: ocrThreshold
         )
         self.ocrConfiguration = configuration
+        self.cleanupConfiguration = cleanupConfiguration
         self.ocrRecognizer = { page, configuration in
             PdfOCREngine.recognize(page: page, configuration: configuration)
         }
     }
 
-    /// Preferred initializer for multilingual and advanced OCR configuration.
-    public init(ocrConfiguration: PdfOCRConfiguration) {
+    /// Preferred initializer for multilingual OCR and cleanup configuration.
+    public init(
+        ocrConfiguration: PdfOCRConfiguration,
+        cleanupConfiguration: PdfCleanupConfiguration = .audiobookDefault
+    ) {
         self.ocrConfiguration = ocrConfiguration
+        self.cleanupConfiguration = cleanupConfiguration
         self.ocrRecognizer = { page, configuration in
             PdfOCREngine.recognize(page: page, configuration: configuration)
         }
@@ -31,9 +41,11 @@ public final class PdfParser: @unchecked Sendable {
     /// Test seam that keeps OCR invocation/selection behavior directly verifiable.
     init(
         ocrConfiguration: PdfOCRConfiguration,
+        cleanupConfiguration: PdfCleanupConfiguration = .audiobookDefault,
         ocrRecognizer: @escaping OCRRecognizer
     ) {
         self.ocrConfiguration = ocrConfiguration
+        self.cleanupConfiguration = cleanupConfiguration
         self.ocrRecognizer = ocrRecognizer
     }
 
@@ -90,11 +102,18 @@ public final class PdfParser: @unchecked Sendable {
             return NSBitmapImageRep(data: tiff)?.representation(using: .jpeg, properties: [:])
         }()
 
+        // Page-local normalization happens during extraction. Once all pages are
+        // available, a separate document-level pass can safely detect running
+        // headers/footers and sequential pagination without guessing from one page.
         var pages: [PdfPageContent] = []
         pages.reserveCapacity(pageCount)
         for pageIndex in 0..<pageCount {
             pages.append(extractPage(document.page(at: pageIndex), pageIndex: pageIndex))
         }
+        pages = PdfDocumentTextCleaner.clean(
+            pages,
+            configuration: cleanupConfiguration
+        )
 
         let chapters = PdfChapterBuilder.build(toc: tableOfContents, pages: pages)
         let metadata = PdfMetadata(
@@ -152,7 +171,10 @@ public final class PdfParser: @unchecked Sendable {
             confidence = ocrResult.confidence
         }
 
-        let cleanedText = PdfTextCleaner.clean(selectedText)
+        let cleanedText = PdfTextCleaner.cleanPage(
+            selectedText,
+            configuration: cleanupConfiguration
+        )
         if cleanedText.isEmpty {
             source = .empty
             confidence = 0
