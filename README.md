@@ -123,6 +123,8 @@ PDF text does not carry a universal semantic reading order. PDFKit generally wor
 
 These are documented limitations rather than reasons to introduce a heavyweight layout model into the default parsing path.
 
+`PdfChapter` identity is still UUID-based in the current hardening branch; deterministic chapter identity and model immutability are intentionally handled in Phase 7 rather than being mixed into the async parser work.
+
 ## Development
 
 Run the package regression suite with:
