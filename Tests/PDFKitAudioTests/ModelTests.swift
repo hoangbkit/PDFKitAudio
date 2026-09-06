@@ -124,4 +124,104 @@ final class ModelTests: XCTestCase {
 
         XCTAssertEqual(book.allPlainText(), "first\n\nsecond")
     }
+
+    func testAudiobookScriptMergesAdjacentPagesWithExactUnionRange() {
+        let pages = [
+            PdfPageContent(pageIndex: 0, nativeText: "Page zero sentence.", text: "Page zero sentence.", extractionSource: .native, confidence: 1),
+            PdfPageContent(pageIndex: 1, nativeText: "Page one sentence.", text: "Page one sentence.", extractionSource: .native, confidence: 0.8)
+        ]
+        let chapter = PdfChapter(
+            id: "chapter-0",
+            title: "One",
+            pageRange: 0...1,
+            order: 0,
+            plainText: "Page zero sentence.\n\nPage one sentence.",
+            htmlPreview: ""
+        )
+        let book = PdfBook(
+            metadata: PdfMetadata(pageCount: 2),
+            pages: pages,
+            chapters: [chapter],
+            toc: [],
+            cover: nil,
+            fileURL: nil
+        )
+
+        let segments = book.audiobookScript(configuration: TTSChunkingConfiguration(
+            maxCharacters: 100,
+            preferredMinimumCharacters: 20,
+            preserveParagraphs: true
+        ))
+
+        XCTAssertEqual(segments.count, 1)
+        XCTAssertEqual(segments[0].sourcePageRange, 0...1)
+        XCTAssertEqual(segments[0].pageIndex, 0)
+        XCTAssertEqual(normalized(segments[0].text), "Page zero sentence. Page one sentence.")
+        XCTAssertGreaterThan(segments[0].confidence, 0.8)
+        XCTAssertLessThan(segments[0].confidence, 1)
+    }
+
+    func testAudiobookScriptNeverMergesAcrossChapterBoundary() {
+        let pages = [
+            PdfPageContent(pageIndex: 0, nativeText: "First chapter.", text: "First chapter.", extractionSource: .native, confidence: 1),
+            PdfPageContent(pageIndex: 1, nativeText: "Second chapter.", text: "Second chapter.", extractionSource: .native, confidence: 1)
+        ]
+        let chapters = [
+            PdfChapter(id: "chapter-0", title: "One", pageRange: 0...0, order: 0, plainText: "First chapter.", htmlPreview: ""),
+            PdfChapter(id: "chapter-1", title: "Two", pageRange: 1...1, order: 1, plainText: "Second chapter.", htmlPreview: "")
+        ]
+        let book = PdfBook(
+            metadata: PdfMetadata(pageCount: 2),
+            pages: pages,
+            chapters: chapters,
+            toc: [],
+            cover: nil,
+            fileURL: nil
+        )
+
+        let segments = book.audiobookScript(configuration: TTSChunkingConfiguration(
+            maxCharacters: 100,
+            preferredMinimumCharacters: 20,
+            preserveParagraphs: false
+        ))
+
+        XCTAssertEqual(segments.count, 2)
+        XCTAssertEqual(segments.map(\.sourcePageRange), [0...0, 1...1])
+        XCTAssertEqual(segments.map(\.chapterIndex), [0, 1])
+    }
+
+    func testAudiobookGeneratedSegmentIDsAreStableAcrossCalls() {
+        let page = PdfPageContent(
+            pageIndex: 0,
+            nativeText: "Stable segment identity text.",
+            text: "Stable segment identity text.",
+            extractionSource: .native,
+            confidence: 1
+        )
+        let chapter = PdfChapter(
+            title: "One",
+            pageRange: 0...0,
+            order: 0,
+            plainText: page.text,
+            htmlPreview: ""
+        )
+        let book = PdfBook(
+            metadata: PdfMetadata(pageCount: 1),
+            pages: [page],
+            chapters: [chapter],
+            toc: [],
+            cover: nil,
+            fileURL: nil
+        )
+
+        let first = book.audiobookScript().map(\.id)
+        let second = book.audiobookScript().map(\.id)
+
+        XCTAssertEqual(first, second)
+        XCTAssertTrue(first.allSatisfy { $0.hasPrefix("segment-") })
+    }
+
+    private func normalized(_ text: String) -> String {
+        text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    }
 }
