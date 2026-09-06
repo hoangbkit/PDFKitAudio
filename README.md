@@ -71,6 +71,46 @@ Chunking prefers paragraph and Foundation sentence boundaries, then clause/word 
 
 Spokio already owns richer engine-facing chunking in `TextToSpeech` (`ProsodyTextChunker`), so PDFKitAudio deliberately does not duplicate prosody or silence-boundary semantics.
 
+## Async parsing, progress, and cancellation
+
+For UI-driven imports, projects, and bulk workflows, use the async API instead of manually wrapping synchronous parsing in `Task.detached`:
+
+```swift
+let parser = PdfParser(
+    ocrMode: .auto,
+    extractCoverImage: false
+)
+
+let book = try await parser.parse(at: url, progress: { progress in
+    print("\(progress.stage): \(progress.completedPages)/\(progress.totalPages)")
+})
+```
+
+When progress is not needed, `parseAsync(at:)` and `parseAsync(data:)` provide the shorter form:
+
+```swift
+let book = try await parser.parseAsync(at: url)
+```
+
+The older synchronous `parse(at:)` and `parse(data:)` APIs remain source-compatible, including when called from an async context. The progress-reporting async overload therefore requires the `progress:` label instead of using a default that could shadow an existing synchronous call.
+
+`PdfParseProgress` reports these high-level stages:
+
+- `loading`
+- `extracting` with monotonic completed/total page counts
+- `cleaning`
+- `buildingChapters`
+- `finishing`
+- `finished`
+
+Progress callbacks run on the parser task's executor. Callers that update UI should hop to `MainActor` in the callback rather than assuming main-thread delivery.
+
+Async parsing preserves Swift task cancellation as `CancellationError`. Cancellation is checked before every source page, immediately before OCR rendering/recognition, immediately after OCR returns, and around document-wide cleanup/chapter/cover work. Vision recognition itself is synchronous, so one OCR page is the maximum non-interruptible unit.
+
+PDFKit access is intentionally serial rather than page-parallel. Each page is processed inside an autorelease pool, OCR thumbnails are page-scoped, and no rendered page images are retained by `PdfBook`. Cover rendering is deferred until text/chapter work is complete, remains bounded to a small thumbnail, and can be disabled with `extractCoverImage: false` for bulk imports.
+
+PDFKitAudio deliberately does not add an `AsyncSequence` page-streaming API yet. Spokio's job model already uses `async throws` work plus progress reporting, so stage/page progress is the smaller integration surface unless a real workflow later demonstrates a need for streaming partial page objects.
+
 ## Current limitations
 
 PDF text does not carry a universal semantic reading order. PDFKit generally works well for ordinary books and single-column documents, but results can still be imperfect for:
@@ -93,4 +133,4 @@ swift test
 
 Tests generate small PDF fixtures at runtime so binary fixture files are not required in the repository.
 
-Current hardening status: Phases 0-5 are complete. See `PLAN.md` for the remaining concurrency, platform, and Spokio integration phases.
+Current hardening status: Phases 0-6 are complete. See `PLAN.md` for the remaining platform/API polish and Spokio integration phases.
