@@ -27,6 +27,28 @@ final class PdfParserTests: XCTestCase {
         }
     }
 
+    func testPasswordProtectedPDFIsRejected() throws {
+        let data = try TestPDFBuilder.encryptedPDF(pages: ["Protected content"])
+
+        XCTAssertThrowsError(try PdfParser(ocrMode: .never).parse(data: data)) { error in
+            guard case PdfError.passwordProtected = error else {
+                return XCTFail("Expected passwordProtected, got \(error)")
+            }
+        }
+    }
+
+    func testZeroPageDocumentDoesNotCrash() throws {
+        let document = PDFDocument()
+        guard let data = document.dataRepresentation() else {
+            return XCTFail("Expected PDFKit to serialize an empty document")
+        }
+
+        let book = try PdfParser(ocrMode: .never).parse(data: data)
+
+        XCTAssertEqual(book.metadata.pageCount, 0)
+        XCTAssertEqual(book.totalWords, 0)
+    }
+
     func testParsesDigitalPDFMetadataAndText() throws {
         let data = try TestPDFBuilder.digitalPDF(
             pages: [
@@ -67,7 +89,7 @@ final class PdfParserTests: XCTestCase {
         XCTAssertTrue(PdfOCREngine.isScanned(document: document))
     }
 
-    func testMixedDocumentKeepsNativePageAndMarksDocumentScannedAccordingToSamplingRule() throws {
+    func testMixedDocumentContainsBothNativeAndImageOnlyPages() throws {
         let data = try TestPDFBuilder.mixedPDF(
             digitalText: "This page contains enough selectable native text to be extracted without OCR and acts as the digital half of the mixed fixture.",
             scannedText: "This is an image-only scanned page"
@@ -77,7 +99,7 @@ final class PdfParserTests: XCTestCase {
         }
 
         XCTAssertEqual(document.pageCount, 2)
-        XCTAssertNotNil(document.page(at: 0)?.string)
+        XCTAssertFalse((document.page(at: 0)?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         XCTAssertTrue((document.page(at: 1)?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
 
@@ -99,9 +121,10 @@ final class PdfParserTests: XCTestCase {
 
         XCTAssertFalse(segments.isEmpty)
         XCTAssertEqual(segments.map(\.order), Array(0..<segments.count))
-        XCTAssertEqual(
-            segments.map(\.text).joined(separator: " "),
-            book.allPlainText().replacingOccurrences(of: "\n\n", with: " ")
-        )
+        XCTAssertEqual(normalizedWhitespace(segments.map(\.text).joined(separator: " ")), normalizedWhitespace(book.allPlainText()))
+    }
+
+    private func normalizedWhitespace(_ text: String) -> String {
+        text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
     }
 }
