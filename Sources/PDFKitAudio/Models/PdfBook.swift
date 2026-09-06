@@ -89,52 +89,148 @@ public final class PdfBook: @unchecked Sendable {
         return chapters.map(\.plainText).joined(separator: separator)
     }
 
-    public func audiobookScript(maxCharsPerSegment: Int = 2800) -> [AudiobookSegment] {
+    /// Backward-compatible convenience API. Character limits here are generic
+    /// document limits, not TTS-engine token/prosody limits.
+    public func audiobookScript(maxCharsPerSegment: Int = 2_800) -> [AudiobookSegment] {
+        audiobookScript(configuration: TTSChunkingConfiguration(
+            maxCharacters: maxCharsPerSegment
+        ))
+    }
+
+    /// Builds deterministic, source-aware convenience segments without encoding
+    /// any engine-specific token, prosody, or pause policy.
+    public func audiobookScript(
+        configuration: TTSChunkingConfiguration
+    ) -> [AudiobookSegment] {
         var segments: [AudiobookSegment] = []
         var globalOrder = 0
-
         let pagesByIndex = Dictionary(uniqueKeysWithValues: pages.map { ($0.pageIndex, $0) })
 
         for (chapterIndex, chapter) in chapters.enumerated() {
             let chapterPages = chapter.pageRange.compactMap { pagesByIndex[$0] }
+            let pieces: [AttributedChunk]
 
             if chapterPages.isEmpty {
-                // Compatibility path for manually-created books without page models.
-                for chunk in chapter.ttsChunks(maxCharacters: maxCharsPerSegment) {
-                    segments.append(AudiobookSegment(
-                        id: "\(chapter.id)-\(globalOrder)",
-                        chapterIndex: chapterIndex,
-                        chapterTitle: chapter.title,
-                        text: chunk,
-                        order: globalOrder,
+                pieces = TTSChunker.chunk(
+                    text: chapter.plainText,
+                    configuration: configuration
+                ).map {
+                    AttributedChunk(
+                        text: $0,
                         sourcePageRange: chapter.pageRange,
                         confidence: chapter.confidence
-                    ))
-                    globalOrder += 1
+                    )
                 }
-                continue
+            } else {
+                pieces = chapterPages.flatMap { page in
+                    TTSChunker.chunk(
+                        text: page.text,
+                        configuration: configuration
+                    ).map {
+                        AttributedChunk(
+                            text: $0,
+                            sourcePageRange: page.pageIndex...page.pageIndex,
+                            confidence: page.confidence
+                        )
+                    }
+                }
             }
 
-            // Phase 1 intentionally chunks within source-page boundaries. This
-            // gives every segment exact provenance. A later segmentation phase can
-            // merge across pages while carrying the union of their source ranges.
-            for page in chapterPages where !page.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                let chunks = TTSChunker.chunk(text: page.text, maxLength: maxCharsPerSegment)
-                for chunk in chunks {
-                    segments.append(AudiobookSegment(
-                        id: "\(chapter.id)-\(globalOrder)",
-                        chapterIndex: chapterIndex,
-                        chapterTitle: chapter.title,
-                        text: chunk,
-                        order: globalOrder,
-                        sourcePageRange: page.pageIndex...page.pageIndex,
-                        confidence: page.confidence
-                    ))
-                    globalOrder += 1
-                }
+            for piece in packAdjacentPieces(
+                pieces,
+                maximumCharacters: configuration.maxCharacters
+            ) {
+                let id = stableSegmentID(
+                    chapterIndex: chapterIndex,
+                    order: globalOrder,
+                    sourcePageRange: piece.sourcePageRange,
+                    text: piece.text
+                )
+                segments.append(AudiobookSegment(
+                    id: id,
+                    chapterIndex: chapterIndex,
+                    chapterTitle: chapter.title,
+                    text: piece.text,
+                    order: globalOrder,
+                    sourcePageRange: piece.sourcePageRange,
+                    confidence: piece.confidence
+                ))
+                globalOrder += 1
             }
         }
 
         return segments
+    }
+
+    private func packAdjacentPieces(
+        _ pieces: [AttributedChunk],
+        maximumCharacters: Int
+    ) -> [AttributedChunk] {
+        guard !pieces.isEmpty else { return [] }
+
+        var packed: [AttributedChunk] = []
+        var current = pieces[0]
+
+        for piece in pieces.dropFirst() {
+            let candidateText = current.text + " " + piece.text
+            let isAdjacent = piece.sourcePageRange.lowerBound
+                <= current.sourcePageRange.upperBound + 1
+
+            if isAdjacent && candidateText.count <= maximumCharacters {
+                current = current.merging(piece, joinedText: candidateText)
+            } else {
+                packed.append(current)
+                current = piece
+            }
+        }
+
+        packed.append(current)
+        return packed
+    }
+
+    private func stableSegmentID(
+        chapterIndex: Int,
+        order: Int,
+        sourcePageRange: ClosedRange<Int>,
+        text: String
+    ) -> String {
+        let identity = [
+            String(chapterIndex),
+            String(order),
+            String(sourcePageRange.lowerBound),
+            String(sourcePageRange.upperBound),
+            text
+        ].joined(separator: "|")
+
+        // Swift's Hasher is intentionally randomized between processes. FNV-1a
+        // keeps generated segment IDs stable for the same parsed book and config.
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in identity.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        return "segment-" + String(hash, radix: 16)
+    }
+}
+
+private struct AttributedChunk {
+    let text: String
+    let sourcePageRange: ClosedRange<Int>
+    let confidence: Double
+
+    func merging(_ other: AttributedChunk, joinedText: String) -> AttributedChunk {
+        let leftWeight = max(1, text.count)
+        let rightWeight = max(1, other.text.count)
+        let totalWeight = leftWeight + rightWeight
+        let weightedConfidence = (
+            confidence * Double(leftWeight)
+                + other.confidence * Double(rightWeight)
+        ) / Double(totalWeight)
+
+        return AttributedChunk(
+            text: joinedText,
+            sourcePageRange: sourcePageRange.lowerBound...other.sourcePageRange.upperBound,
+            confidence: weightedConfidence
+        )
     }
 }
