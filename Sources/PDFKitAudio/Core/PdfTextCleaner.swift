@@ -93,7 +93,7 @@ enum PdfTextCleaner {
         // A soft hyphen is explicitly discretionary, so removing it at a line
         // boundary is safe and language-independent.
         var text = text.replacingOccurrences(of: "­\n", with: "")
-        var lines = text.components(separatedBy: "\n")
+        let lines = text.components(separatedBy: "\n")
         var result: [String] = []
         var index = 0
 
