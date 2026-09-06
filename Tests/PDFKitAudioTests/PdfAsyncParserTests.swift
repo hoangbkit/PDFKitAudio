@@ -12,7 +12,7 @@ final class PdfAsyncParserTests: XCTestCase {
         let parser = PdfParser(ocrMode: .never, extractCoverImage: false)
 
         let synchronousBook = try parser.parse(data: data)
-        let asynchronousBook = try await parser.parse(data: data)
+        let asynchronousBook = try await parser.parseAsync(data: data)
 
         XCTAssertEqual(asynchronousBook.metadata.pageCount, synchronousBook.metadata.pageCount)
         XCTAssertEqual(asynchronousBook.metadata.isScanned, synchronousBook.metadata.isScanned)
@@ -53,13 +53,13 @@ final class PdfAsyncParserTests: XCTestCase {
     }
 
     func testAsyncCancellationPropagatesAfterCurrentOCRPageFinishes() async throws {
-        let recognizerStarted = DispatchSemaphore(value: 0)
+        let recognizerStarted = expectation(description: "OCR recognizer started")
         let allowRecognizerToFinish = DispatchSemaphore(value: 0)
         let parser = PdfParser(
             ocrConfiguration: PdfOCRConfiguration(mode: .always),
             extractCoverImage: false,
             ocrRecognizer: { _, _ in
-                recognizerStarted.signal()
+                recognizerStarted.fulfill()
                 _ = allowRecognizerToFinish.wait(timeout: .now() + 5)
                 return PdfOCREngine.OCRResult(
                     text: "OCR result that should be discarded after cancellation.",
@@ -72,16 +72,10 @@ final class PdfAsyncParserTests: XCTestCase {
         ])
 
         let task = Task {
-            try await parser.parse(data: data)
+            try await parser.parseAsync(data: data)
         }
 
-        let started = recognizerStarted.wait(timeout: .now() + 5)
-        guard started == .success else {
-            task.cancel()
-            allowRecognizerToFinish.signal()
-            return XCTFail("Timed out waiting for the OCR recognizer to start")
-        }
-
+        await fulfillment(of: [recognizerStarted], timeout: 5)
         task.cancel()
         allowRecognizerToFinish.signal()
 
