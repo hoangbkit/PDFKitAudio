@@ -23,4 +23,4 @@ jobs:
         run: swift --version
 
       - name: Run tests
-        run: swift test --parallel
+        run: swift test

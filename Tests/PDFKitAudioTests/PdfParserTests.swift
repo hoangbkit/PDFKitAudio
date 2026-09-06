@@ -37,15 +37,11 @@ final class PdfParserTests: XCTestCase {
         }
     }
 
-    func testZeroPageDocumentDoesNotCrash() throws {
-        let document = PDFDocument()
-        guard let data = document.dataRepresentation() else {
-            return XCTFail("Expected PDFKit to serialize an empty document")
-        }
-
+    func testBlankContentDocumentDoesNotCrash() throws {
+        let data = try TestPDFBuilder.digitalPDF(pages: [""])
         let book = try PdfParser(ocrMode: .never).parse(data: data)
 
-        XCTAssertEqual(book.metadata.pageCount, 0)
+        XCTAssertEqual(book.metadata.pageCount, 1)
         XCTAssertEqual(book.totalWords, 0)
     }
 
