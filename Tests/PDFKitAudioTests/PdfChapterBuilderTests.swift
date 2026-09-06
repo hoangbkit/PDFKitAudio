@@ -160,7 +160,7 @@ final class PdfChapterBuilderTests: XCTestCase {
 
         let chapters = PdfChapterBuilder.build(toc: [], pages: pages)
 
-        XCTAssertEqual(chapters.map(\.title), ["Front Matter", "Chapter 1\nOpening text", "CHAPTER II\nSecond chapter"])
+        XCTAssertEqual(chapters.map(\.title), ["Front Matter", "Chapter 1", "CHAPTER II"])
         XCTAssertEqual(chapters.map(\.pageRange), [0...0, 1...2, 3...3])
     }
 
