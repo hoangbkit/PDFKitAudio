@@ -201,8 +201,11 @@ enum PdfDocumentTextCleaner {
         for group in grouped.values {
             guard let firstPattern = group.first?.1 else { continue }
             let uniquePages = Set(group.map { $0.0.pageOffset })
+            // Two points are not enough evidence for numeric pagination: a
+            // two-page report containing consecutive years would otherwise be
+            // indistinguishable from page numbers. Require at least three pages.
             let required = firstPattern.isPurePagination
-                ? min(3, max(2, pageCount))
+                ? 3
                 : requiredOccurrences(pageCount: pageCount)
             guard uniquePages.count >= required else { continue }
 
