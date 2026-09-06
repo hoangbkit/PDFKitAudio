@@ -51,4 +51,4 @@ swift test
 
 Tests generate small PDF fixtures at runtime so binary fixture files are not required in the repository.
 
-See `PLAN.md` for the phased production-hardening plan aimed at Spokio integration.
+Current hardening status: Phases 0-3 are complete. See `PLAN.md` for the remaining audiobook cleanup, segmentation, concurrency, platform, and Spokio integration phases.
