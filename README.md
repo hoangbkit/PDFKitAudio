@@ -51,6 +51,26 @@ let parser = PdfParser(
 
 PDF outline entries are retained as navigation metadata independently from audiobook chapter boundaries. Nested and repeated outline destinations are normalized into monotonic, non-overlapping spoken chapter ranges, and meaningful content before the first chapter is preserved as front matter.
 
+## Audiobook segmentation
+
+PDFKitAudio provides an engine-agnostic convenience segmenter for callers that want bounded text with page provenance. `TTSChunkingConfiguration` controls only generic document behavior such as character limits and paragraph preservation; TTS-engine token limits, prosody, pause durations, retries, and generation policy belong in the consuming TTS layer.
+
+```swift
+let segments = book.audiobookScript(configuration: TTSChunkingConfiguration(
+    maxCharacters: 2_800,
+    preferredMinimumCharacters: 700,
+    preserveParagraphs: true
+))
+```
+
+The configuration-based API may pack adjacent short pieces across page boundaries inside the same chapter. Every resulting `AudiobookSegment` carries the exact union `sourcePageRange`, character-weighted confidence, deterministic ordering, and a stable generated ID. Segments never merge across chapter boundaries.
+
+The legacy `audiobookScript(maxCharsPerSegment:)` API remains page-bounded so existing callers do not silently receive wider provenance ranges.
+
+Chunking prefers paragraph and Foundation sentence boundaries, then clause/word boundaries. A hard split is reserved for an unbroken token that exceeds the maximum, and Swift grapheme-cluster indexing keeps Unicode characters intact.
+
+Spokio already owns richer engine-facing chunking in `TextToSpeech` (`ProsodyTextChunker`), so PDFKitAudio deliberately does not duplicate prosody or silence-boundary semantics.
+
 ## Current limitations
 
 PDF text does not carry a universal semantic reading order. PDFKit generally works well for ordinary books and single-column documents, but results can still be imperfect for:
@@ -73,4 +93,4 @@ swift test
 
 Tests generate small PDF fixtures at runtime so binary fixture files are not required in the repository.
 
-Current hardening status: Phases 0-4 are complete. See `PLAN.md` for the remaining segmentation, concurrency, platform, and Spokio integration phases.
+Current hardening status: Phases 0-5 are complete. See `PLAN.md` for the remaining concurrency, platform, and Spokio integration phases.
