@@ -2,18 +2,42 @@
 
 Lightweight PDF extraction and audiobook-oriented text preparation for Apple platforms.
 
-The current implementation uses PDFKit native text extraction first and can selectively fall back to Vision OCR. It intentionally avoids heavyweight document-understanding models.
+The parser uses PDFKit native text first and selectively falls back to Vision OCR. It intentionally avoids heavyweight document-understanding models.
+
+## OCR
+
+Default parsing keeps healthy digital PDFs on the native fast path. Pages with missing, short, or suspicious native text become OCR candidates.
+
+Vision automatic language detection is enabled by default; PDFKitAudio no longer hard-codes English. Callers that need tighter control can provide explicit recognition languages and recognition behavior:
+
+```swift
+let parser = PdfParser(ocrConfiguration: PdfOCRConfiguration(
+    mode: .auto,
+    recognitionLanguages: ["vi-VN", "en-US"],
+    automaticallyDetectsLanguage: false,
+    recognitionLevel: .accurate
+))
+
+let book = try parser.parse(at: url)
+```
+
+`PdfParser()` and `PdfParser(ocrMode:)` remain available for simple and existing callers.
+
+Running OCR does not automatically replace native PDF text. PDFKitAudio keeps the native result when OCR is empty, low-confidence, or does not provide enough information gain.
+
+## Chapters and navigation
+
+PDF outline entries are retained as navigation metadata independently from audiobook chapter boundaries. Nested and repeated outline destinations are normalized into monotonic, non-overlapping spoken chapter ranges, and meaningful content before the first chapter is preserved as front matter.
 
 ## Current limitations
 
-PDF text does not carry a universal semantic reading order. PDFKit generally works well for ordinary books and single-column documents, but results can be imperfect for:
+PDF text does not carry a universal semantic reading order. PDFKit generally works well for ordinary books and single-column documents, but results can still be imperfect for:
 
 - multi-column academic papers and magazines
 - pages with floating text boxes, sidebars, or complex positioned layouts
 - tables where visual structure is important
 - PDFs with malformed or unusual embedded text encodings
-- nested or repeated outline destinations (chapter construction is scheduled for hardening)
-- scanned documents in languages outside the OCR configuration currently used by the parser
+- scanned languages or scripts not supported by the Vision version on the target OS
 
 These are documented limitations rather than reasons to introduce a heavyweight layout model into the default parsing path.
 
