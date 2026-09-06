@@ -33,7 +33,16 @@ public final class PdfBook: @unchecked Sendable {
         fileURL: URL?
     ) {
         self.metadata = metadata
-        self.pages = pages.sorted { $0.pageIndex < $1.pageIndex }
+
+        // Keep one canonical value per source page index even for manually-created
+        // books. Parser-produced books already satisfy this invariant, but enforcing
+        // it here prevents duplicate indexes from crashing provenance lookups later.
+        var pagesByIndex: [Int: PdfPageContent] = [:]
+        for page in pages {
+            pagesByIndex[page.pageIndex] = page
+        }
+        self.pages = pagesByIndex.values.sorted { $0.pageIndex < $1.pageIndex }
+
         self.chapters = chapters
         self.tableOfContents = toc
         self.coverImageData = cover
