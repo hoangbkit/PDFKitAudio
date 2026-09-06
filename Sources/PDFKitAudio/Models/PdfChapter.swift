@@ -37,8 +37,12 @@ public struct PdfChapter: Identifiable, Hashable, Sendable {
     public static func == (lhs: PdfChapter, rhs: PdfChapter) -> Bool { lhs.id == rhs.id }
     public func hash(into hasher: inout Hasher) { hasher.combine(id) }
 
-    public func ttsChunks(maxCharacters: Int = 2800) -> [String] {
+    public func ttsChunks(maxCharacters: Int = 2_800) -> [String] {
         TTSChunker.chunk(text: plainText, maxLength: maxCharacters)
+    }
+
+    public func ttsChunks(configuration: TTSChunkingConfiguration) -> [String] {
+        TTSChunker.chunk(text: plainText, configuration: configuration)
     }
 }
 
