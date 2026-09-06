@@ -61,8 +61,8 @@ public final class PdfParser: @unchecked Sendable {
 
     /// Synchronous compatibility API.
     ///
-    /// Prefer the async overload for UI-driven or cancellable imports. This
-    /// method intentionally does not inherit Swift task cancellation semantics.
+    /// Prefer the async API for UI-driven or cancellable imports. This method
+    /// intentionally does not inherit Swift task cancellation semantics.
     public func parse(at url: URL) throws -> PdfBook {
         try parseFile(at: url, control: .synchronous)
     }
@@ -74,8 +74,11 @@ public final class PdfParser: @unchecked Sendable {
 
     // MARK: - Asynchronous API
 
-    /// Parses a PDF without requiring callers to move blocking PDFKit/Vision work
-    /// off their actor manually.
+    /// Parses a PDF asynchronously with explicit progress reporting.
+    ///
+    /// `progress` intentionally has no default value. That keeps existing
+    /// synchronous `parse(at:)` calls source-compatible even when they appear
+    /// inside an async function. Use `parseAsync(at:)` when progress is not needed.
     ///
     /// The parser keeps PDFKit page access serial and checks Swift task
     /// cancellation between page-sized operations. Progress callbacks execute on
@@ -83,19 +86,35 @@ public final class PdfParser: @unchecked Sendable {
     /// mutating UI state.
     public func parse(
         at url: URL,
-        progress: ProgressHandler? = nil
+        progress: ProgressHandler?
     ) async throws -> PdfBook {
         try Task.checkCancellation()
         return try parseFile(at: url, control: .asynchronous(progress: progress))
     }
 
-    /// Data equivalent of the async URL API.
+    /// Data equivalent of the progress-reporting async URL API.
     public func parse(
         data: Data,
-        progress: ProgressHandler? = nil
+        progress: ProgressHandler?
     ) async throws -> PdfBook {
         try Task.checkCancellation()
         return try parseData(data, control: .asynchronous(progress: progress))
+    }
+
+    /// Convenience async API when the caller does not need progress callbacks.
+    public func parseAsync(
+        at url: URL,
+        progress: ProgressHandler? = nil
+    ) async throws -> PdfBook {
+        try await parse(at: url, progress: progress)
+    }
+
+    /// Data equivalent of `parseAsync(at:progress:)`.
+    public func parseAsync(
+        data: Data,
+        progress: ProgressHandler? = nil
+    ) async throws -> PdfBook {
+        try await parse(data: data, progress: progress)
     }
 
     // MARK: - Shared parse core
