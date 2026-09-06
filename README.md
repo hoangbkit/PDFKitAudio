@@ -25,6 +25,28 @@ let book = try parser.parse(at: url)
 
 Running OCR does not automatically replace native PDF text. PDFKitAudio keeps the native result when OCR is empty, low-confidence, or does not provide enough information gain.
 
+## Audiobook cleanup
+
+The default parser applies two lightweight cleanup stages before chapter construction:
+
+- page-local control/ligature/whitespace normalization
+- conservative line-wrap dehyphenation
+- document-level suppression of short recurring header/footer lines
+- sequential page-number removal only after a pattern is proven across at least three pages
+
+Repeated running text keeps its first semantic occurrence rather than disappearing everywhere. Standalone years, quantities, scores, and other numeric lines are not removed simply because they look like page numbers. `PdfPageContent.nativeText` remains unchanged for diagnostics even when the selected spoken text is cleaned.
+
+Cleanup is configurable independently from OCR:
+
+```swift
+let parser = PdfParser(
+    ocrMode: .auto,
+    cleanupConfiguration: .minimal
+)
+```
+
+`.minimal` keeps safe page-local normalization while disabling document-level running-matter suppression and automatic line-wrap dehyphenation.
+
 ## Chapters and navigation
 
 PDF outline entries are retained as navigation metadata independently from audiobook chapter boundaries. Nested and repeated outline destinations are normalized into monotonic, non-overlapping spoken chapter ranges, and meaningful content before the first chapter is preserved as front matter.
@@ -51,4 +73,4 @@ swift test
 
 Tests generate small PDF fixtures at runtime so binary fixture files are not required in the repository.
 
-Current hardening status: Phases 0-3 are complete. See `PLAN.md` for the remaining audiobook cleanup, segmentation, concurrency, platform, and Spokio integration phases.
+Current hardening status: Phases 0-4 are complete. See `PLAN.md` for the remaining segmentation, concurrency, platform, and Spokio integration phases.
