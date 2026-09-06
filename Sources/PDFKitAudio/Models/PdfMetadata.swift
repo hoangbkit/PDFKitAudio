@@ -42,18 +42,40 @@ public struct PdfMetadata: Sendable {
     }
 }
 
+/// One navigation entry from the PDF outline.
+///
+/// Outline destinations are navigation metadata, not audiobook chapter boundaries.
+/// `pageIndex` is optional because real PDFs can contain unresolved, malformed, or
+/// non-page outline actions. Parsed items use deterministic outline-path IDs so
+/// identity remains stable across repeated parses of the same document.
 public struct PdfTOCItem: Identifiable, Hashable, Sendable {
     public let id: String
     public var title: String
-    public var pageIndex: Int
+    public var pageIndex: Int?
     public var level: Int
     public var children: [PdfTOCItem]
 
-    public init(id: String = UUID().uuidString, title: String, pageIndex: Int, level: Int = 0, children: [PdfTOCItem] = []) {
-        self.id = id
+    public init(
+        id: String? = nil,
+        title: String,
+        pageIndex: Int?,
+        level: Int = 0,
+        children: [PdfTOCItem] = []
+    ) {
         self.title = title
         self.pageIndex = pageIndex
         self.level = level
         self.children = children
+
+        if let id {
+            self.id = id
+        } else {
+            // Manual construction remains deterministic. Parsed outline items use
+            // stronger path-based IDs supplied by `PdfTOCParser`.
+            let destination = pageIndex.map(String.init) ?? "unresolved"
+            self.id = "manual:\(level):\(destination):\(title)"
+        }
     }
+
+    public var hasResolvedDestination: Bool { pageIndex != nil }
 }
