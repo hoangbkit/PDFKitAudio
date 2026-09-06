@@ -42,6 +42,35 @@ final class ModelTests: XCTestCase {
         XCTAssertFalse(page.isOCRSourced)
     }
 
+    func testBookCanonicalizesDuplicatePageIndexes() {
+        let first = PdfPageContent(
+            pageIndex: 0,
+            nativeText: "first",
+            text: "first",
+            extractionSource: .native,
+            confidence: 1
+        )
+        let replacement = PdfPageContent(
+            pageIndex: 0,
+            nativeText: "replacement",
+            text: "replacement",
+            extractionSource: .native,
+            confidence: 1
+        )
+        let book = PdfBook(
+            metadata: PdfMetadata(pageCount: 1),
+            pages: [first, replacement],
+            chapters: [],
+            toc: [],
+            cover: nil,
+            fileURL: nil
+        )
+
+        XCTAssertEqual(book.pages.count, 1)
+        XCTAssertEqual(book.pages[0].pageIndex, 0)
+        XCTAssertEqual(book.pages[0].text, "replacement")
+    }
+
     func testOCRAndEmptyPageCountsUseCanonicalPagesNotChapterFlags() {
         let pages = [
             PdfPageContent(pageIndex: 0, nativeText: "one", text: "one", extractionSource: .native, confidence: 1),
