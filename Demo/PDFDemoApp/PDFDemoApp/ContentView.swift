@@ -73,7 +73,10 @@ struct ContentView: View {
                         Text("Outline").font(.headline)
                         ForEach(book.tableOfContents.prefix(25)) { item in
                             Button(item.title) {
-                                if let ch = book.chapters.first(where: { $0.pageRange.contains(item.pageIndex) }) { vm.selectedChapter = ch }
+                                if let pageIndex = item.pageIndex,
+                                   let chapter = book.chapters.first(where: { $0.pageRange.contains(pageIndex) }) {
+                                    vm.selectedChapter = chapter
+                                }
                             }.buttonStyle(.link).font(.caption).lineLimit(1)
                         }
                     }
@@ -83,7 +86,7 @@ struct ContentView: View {
                 VStack(spacing: 16) {
                     Image(systemName: "doc.text.magnifyingglass").font(.system(size: 48)).foregroundStyle(.secondary)
                     Text("No PDF loaded").font(.headline)
-                    Text("Import a PDF. Auto-OCR triggers when a page has <60 chars. English only, optimized for TTS.").multilineTextAlignment(.center).foregroundStyle(.secondary).font(.callout).padding(.horizontal)
+                    Text("Import a PDF. Auto-OCR runs only when native text looks insufficient, with automatic language detection by default.").multilineTextAlignment(.center).foregroundStyle(.secondary).font(.callout).padding(.horizontal)
                     Button("Import PDF") { showImporter = true }.buttonStyle(.borderedProminent)
                 }.padding(24)
             }
@@ -127,7 +130,7 @@ struct ContentView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
                         Text("Audiobook Script • \(vm.segments.count) segments").font(.title2).bold()
-                        Text("Ready for AVSpeechSynthesizer / ElevenLabs. Auto-OCR used on \(book.ocrPageCount) chapters.").foregroundStyle(.secondary)
+                        Text("Ready for TTS. Auto-OCR supplied text for \(book.ocrPageCount) pages.").foregroundStyle(.secondary)
                         Divider()
                         ForEach(vm.segments.prefix(60)) { seg in
                             VStack(alignment: .leading, spacing: 6) {
