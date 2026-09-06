@@ -89,18 +89,31 @@ public final class PdfBook: @unchecked Sendable {
         return chapters.map(\.plainText).joined(separator: separator)
     }
 
-    /// Backward-compatible convenience API. Character limits here are generic
-    /// document limits, not TTS-engine token/prosody limits.
+    /// Backward-compatible convenience API. It retains page-bounded segmentation
+    /// so existing callers do not silently receive wider provenance ranges.
     public func audiobookScript(maxCharsPerSegment: Int = 2_800) -> [AudiobookSegment] {
-        audiobookScript(configuration: TTSChunkingConfiguration(
-            maxCharacters: maxCharsPerSegment
-        ))
+        makeAudiobookScript(
+            configuration: TTSChunkingConfiguration(maxCharacters: maxCharsPerSegment),
+            mergesAcrossPages: false
+        )
     }
 
-    /// Builds deterministic, source-aware convenience segments without encoding
-    /// any engine-specific token, prosody, or pause policy.
+    /// Preferred Phase 5 API. Adjacent short pieces may be packed across page
+    /// boundaries inside one chapter, with the exact union source range retained.
+    /// The configuration remains engine-agnostic; Spokio's TextToSpeech package
+    /// owns model token limits, prosody boundaries, and pause durations.
     public func audiobookScript(
         configuration: TTSChunkingConfiguration
+    ) -> [AudiobookSegment] {
+        makeAudiobookScript(
+            configuration: configuration,
+            mergesAcrossPages: true
+        )
+    }
+
+    private func makeAudiobookScript(
+        configuration: TTSChunkingConfiguration,
+        mergesAcrossPages: Bool
     ) -> [AudiobookSegment] {
         var segments: [AudiobookSegment] = []
         var globalOrder = 0
@@ -138,7 +151,8 @@ public final class PdfBook: @unchecked Sendable {
 
             for piece in packAdjacentPieces(
                 pieces,
-                maximumCharacters: configuration.maxCharacters
+                maximumCharacters: configuration.maxCharacters,
+                mergesAcrossPages: mergesAcrossPages
             ) {
                 let id = stableSegmentID(
                     chapterIndex: chapterIndex,
@@ -164,7 +178,8 @@ public final class PdfBook: @unchecked Sendable {
 
     private func packAdjacentPieces(
         _ pieces: [AttributedChunk],
-        maximumCharacters: Int
+        maximumCharacters: Int,
+        mergesAcrossPages: Bool
     ) -> [AttributedChunk] {
         guard !pieces.isEmpty else { return [] }
 
@@ -173,10 +188,13 @@ public final class PdfBook: @unchecked Sendable {
 
         for piece in pieces.dropFirst() {
             let candidateText = current.text + " " + piece.text
-            let isAdjacent = piece.sourcePageRange.lowerBound
+            let sameSourceRange = piece.sourcePageRange == current.sourcePageRange
+            let sourceIsAdjacent = piece.sourcePageRange.lowerBound
                 <= current.sourcePageRange.upperBound + 1
+            let provenanceAllowsMerge = sameSourceRange
+                || (mergesAcrossPages && sourceIsAdjacent)
 
-            if isAdjacent && candidateText.count <= maximumCharacters {
+            if provenanceAllowsMerge && candidateText.count <= maximumCharacters {
                 current = current.merging(piece, joinedText: candidateText)
             } else {
                 packed.append(current)
