@@ -45,13 +45,9 @@ public final class PdfParser: @unchecked Sendable {
         let keywordsRaw = attrs[PDFDocumentAttribute.keywordsAttribute] as? String
         let keywords = keywordsRaw?.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) } ?? []
 
-        // TOC
         let toc = PdfTOCParser.parse(document: document)
-
-        // Detect scanned
         let isScannedOverall = PdfOCREngine.isScanned(document: document)
 
-        // Cover
         let coverData: Data? = {
             guard let first = document.page(at: 0) else { return nil }
             let thumb = first.thumbnail(of: CGSize(width: 600, height: 800), for: .mediaBox)
@@ -59,51 +55,19 @@ public final class PdfParser: @unchecked Sendable {
             return NSBitmapImageRep(data: tiff)?.representation(using: .jpeg, properties: [:])
         }()
 
-        // Extract pages with auto OCR logic
-        var pagesText: [(text: String, confidence: Double, isOCR: Bool)] = []
-        pagesText.reserveCapacity(pageCount)
-
-        for i in 0..<pageCount {
-            guard let page = document.page(at: i) else { continue }
-            let raw = page.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            var finalText = raw
-            var confidence = 1.0
-            var isOCR = false
-
-            let shouldOCR: Bool = {
-                switch ocrMode {
-                case .always: return true
-                case .never: return false
-                case .auto: return raw.count < ocrThreshold
-                }
-            }()
-
-            if shouldOCR {
-                if let ocr = PdfOCREngine.recognize(page: page), !ocr.text.isEmpty {
-                    // Prefer OCR if it yields significantly more text
-                    if ocr.text.count > raw.count * 2 || raw.count < ocrThreshold {
-                        finalText = ocr.text
-                        confidence = ocr.confidence
-                        isOCR = true
-                    }
-                } else if raw.isEmpty {
-                    // OCR failed but page is empty, keep empty to avoid breaking flow
-                    finalText = ""
-                    confidence = 0
-                    isOCR = true
-                }
-            }
-
-            let cleaned = PdfTextCleaner.clean(finalText)
-            pagesText.append((cleaned, confidence, isOCR))
+        // Every source page produces exactly one page model. A missing PDFPage is
+        // represented by an empty placeholder so downstream indexes never shift.
+        var pages: [PdfPageContent] = []
+        pages.reserveCapacity(pageCount)
+        for pageIndex in 0..<pageCount {
+            pages.append(extractPage(document.page(at: pageIndex), pageIndex: pageIndex))
         }
 
-        // Build chapters
         let chapters: [PdfChapter]
         if !toc.isEmpty {
-            chapters = buildChaptersFromTOC(toc: toc, pagesText: pagesText, pageCount: pageCount)
+            chapters = buildChaptersFromTOC(toc: toc, pages: pages, pageCount: pageCount)
         } else {
-            chapters = buildChaptersHeuristic(pagesText: pagesText)
+            chapters = buildChaptersHeuristic(pages: pages)
         }
 
         let metadata = PdfMetadata(
@@ -119,98 +83,238 @@ public final class PdfParser: @unchecked Sendable {
             isScanned: isScannedOverall
         )
 
-        return PdfBook(metadata: metadata, chapters: chapters, toc: toc, cover: coverData, fileURL: fileURL)
+        return PdfBook(
+            metadata: metadata,
+            pages: pages,
+            chapters: chapters,
+            toc: toc,
+            cover: coverData,
+            fileURL: fileURL
+        )
     }
 
-    private func buildChaptersFromTOC(toc: [PdfTOCItem], pagesText: [(text:String, confidence:Double, isOCR:Bool)], pageCount: Int) -> [PdfChapter] {
-        // Flatten TOC to sorted page indices
+    private func extractPage(_ page: PDFPage?, pageIndex: Int) -> PdfPageContent {
+        guard let page else {
+            return PdfPageContent(
+                pageIndex: pageIndex,
+                nativeText: "",
+                text: "",
+                extractionSource: .empty,
+                confidence: 0
+            )
+        }
+
+        let nativeText = page.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        var selectedText = nativeText
+        var source: PdfExtractionSource = nativeText.isEmpty ? .empty : .native
+        var confidence = nativeText.isEmpty ? 0.0 : 1.0
+
+        if shouldRunOCR(nativeText: nativeText),
+           let ocr = PdfOCREngine.recognize(page: page),
+           !ocr.text.isEmpty,
+           shouldPreferOCR(ocrText: ocr.text, nativeText: nativeText) {
+            selectedText = ocr.text
+            source = .ocr
+            confidence = ocr.confidence
+        }
+
+        let cleanedText = PdfTextCleaner.clean(selectedText)
+        if cleanedText.isEmpty {
+            source = .empty
+            confidence = 0
+        }
+
+        return PdfPageContent(
+            pageIndex: pageIndex,
+            nativeText: nativeText,
+            text: cleanedText,
+            extractionSource: source,
+            confidence: confidence
+        )
+    }
+
+    private func shouldRunOCR(nativeText: String) -> Bool {
+        switch ocrMode {
+        case .always:
+            return true
+        case .never:
+            return false
+        case .auto:
+            return nativeText.count < ocrThreshold
+        }
+    }
+
+    private func shouldPreferOCR(ocrText: String, nativeText: String) -> Bool {
+        // Preserve the existing selection policy during Phase 1. Phase 3 will
+        // make OCR selection richer and configurable.
+        ocrText.count > nativeText.count * 2 || nativeText.count < ocrThreshold
+    }
+
+    private func buildChaptersFromTOC(
+        toc: [PdfTOCItem],
+        pages: [PdfPageContent],
+        pageCount: Int
+    ) -> [PdfChapter] {
+        guard pageCount > 0 else { return [] }
+
+        // Phase 2 will replace this flattening policy. Phase 1 only moves chapter
+        // construction onto canonical page models while preserving behavior.
         var flat: [PdfTOCItem] = []
-        func flatten(_ items: [PdfTOCItem]) { for it in items { flat.append(it); flatten(it.children) } }
+        func flatten(_ items: [PdfTOCItem]) {
+            for item in items {
+                flat.append(item)
+                flatten(item.children)
+            }
+        }
         flatten(toc)
         let sorted = flat.sorted { $0.pageIndex < $1.pageIndex }
 
         var chapters: [PdfChapter] = []
-        for (idx, item) in sorted.enumerated() {
-            let start = max(0, min(item.pageIndex, pageCount-1))
+        for (index, item) in sorted.enumerated() {
+            let start = max(0, min(item.pageIndex, pageCount - 1))
             let end: Int
-            if idx + 1 < sorted.count { end = max(start, min(sorted[idx+1].pageIndex - 1, pageCount-1)) }
-            else { end = pageCount - 1 }
+            if index + 1 < sorted.count {
+                end = max(start, min(sorted[index + 1].pageIndex - 1, pageCount - 1))
+            } else {
+                end = pageCount - 1
+            }
 
             let range = start...end
-            let texts = range.compactMap { i in i < pagesText.count ? pagesText[i] : nil }
-            let combined = texts.map { $0.text }.joined(separator: "\n\n")
+            let sourcePages = pagesInRange(range, from: pages)
+            let combined = sourcePages.map(\.text).joined(separator: "\n\n")
             guard !combined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
-            let avgConf = texts.isEmpty ? 1.0 : texts.map { $0.confidence }.reduce(0, +) / Double(texts.count)
-            let isOCR = texts.contains { $0.isOCR }
+
+            let averageConfidence = averageConfidence(of: sourcePages)
+            let isOCR = sourcePages.contains(where: \.isOCRSourced)
             let html = PdfTextCleaner.htmlWrap(combined, title: item.title)
-            chapters.append(PdfChapter(title: item.title, pageRange: range, order: idx, plainText: combined, htmlPreview: html, confidence: avgConf, isOCRSourced: isOCR))
+
+            chapters.append(PdfChapter(
+                title: item.title,
+                pageRange: range,
+                order: index,
+                plainText: combined,
+                htmlPreview: html,
+                confidence: averageConfidence,
+                isOCRSourced: isOCR
+            ))
         }
-        if chapters.isEmpty { return buildChaptersHeuristic(pagesText: pagesText) }
+
+        if chapters.isEmpty {
+            return buildChaptersHeuristic(pages: pages)
+        }
         return chapters
     }
 
-    private func buildChaptersHeuristic(pagesText: [(text:String, confidence:Double, isOCR:Bool)]) -> [PdfChapter] {
-        // Simple heuristic: detect "Chapter" headings or split every 20 pages
-        var chapterStarts: [(index:Int, title:String)] = []
-        let chapterRegex = try? NSRegularExpression(pattern: "^(Chapter|CHAPTER|Part|PART)\\s+[\\dIVX]+.*$", options: [.anchorsMatchLines])
+    private func buildChaptersHeuristic(pages: [PdfPageContent]) -> [PdfChapter] {
+        guard !pages.isEmpty else { return [] }
 
-        for (i, page) in pagesText.enumerated() {
+        var chapterStarts: [(pageIndex: Int, title: String)] = []
+        let chapterRegex = try? NSRegularExpression(
+            pattern: "^(Chapter|CHAPTER|Part|PART)\\s+[\\dIVX]+.*$",
+            options: [.anchorsMatchLines]
+        )
+
+        for page in pages {
             let firstLines = page.text.components(separatedBy: .newlines).prefix(4)
             for line in firstLines {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if trimmed.count > 5 && trimmed.count < 120 {
-                    if let regex = chapterRegex, regex.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed)) != nil {
-                        chapterStarts.append((i, trimmed))
-                        break
-                    }
+                if trimmed.count > 5 && trimmed.count < 120,
+                   let regex = chapterRegex,
+                   regex.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed)) != nil {
+                    chapterStarts.append((page.pageIndex, trimmed))
+                    break
                 }
             }
         }
 
         if chapterStarts.isEmpty {
-            // Fallback: chunk every 25 pages as a chapter
-            var chapters: [PdfChapter] = []
-            let chunkSize = 25
-            var order = 0
-            for start in stride(from: 0, to: pagesText.count, by: chunkSize) {
-                let end = min(start + chunkSize - 1, pagesText.count - 1)
-                let slice = pagesText[start...end]
-                let combined = slice.map { $0.text }.joined(separator: "\n\n")
-                guard !combined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
-                let conf = slice.map { $0.confidence }.reduce(0, +) / Double(slice.count)
-                let isOCR = slice.contains { $0.isOCR }
-                let title = order == 0 ? "Beginning" : "Section \(order+1)"
-                let html = PdfTextCleaner.htmlWrap(combined, title: title)
-                chapters.append(PdfChapter(title: title, pageRange: start...end, order: order, plainText: combined, htmlPreview: html, confidence: conf, isOCRSourced: isOCR))
-                order += 1
-            }
-            if chapters.isEmpty {
-                // Single chapter whole book
-                let all = pagesText.map { $0.text }.joined(separator: "\n\n")
-                let conf = pagesText.isEmpty ? 1.0 : pagesText.map { $0.confidence }.reduce(0, +) / Double(pagesText.count)
-                let isOCR = pagesText.contains { $0.isOCR }
-                let html = PdfTextCleaner.htmlWrap(all, title: "Full Text")
-                return [PdfChapter(title: "Full Text", pageRange: 0...max(0, pagesText.count-1), order: 0, plainText: all, htmlPreview: html, confidence: conf, isOCRSourced: isOCR)]
-            }
-            return chapters
-        } else {
-            var chapters: [PdfChapter] = []
-            for (idx, start) in chapterStarts.enumerated() {
-                let startIdx = start.index
-                let endIdx = idx + 1 < chapterStarts.count ? chapterStarts[idx+1].index - 1 : pagesText.count - 1
-                guard startIdx <= endIdx else { continue }
-                let slice = pagesText[startIdx...endIdx]
-                let combined = slice.map { $0.text }.joined(separator: "\n\n")
-                let conf = slice.map { $0.confidence }.reduce(0, +) / Double(slice.count)
-                let isOCR = slice.contains { $0.isOCR }
-                let html = PdfTextCleaner.htmlWrap(combined, title: start.title)
-                chapters.append(PdfChapter(title: start.title, pageRange: startIdx...endIdx, order: idx, plainText: combined, htmlPreview: html, confidence: conf, isOCRSourced: isOCR))
-            }
-            return chapters
+            return buildFallbackPageChunks(pages: pages)
         }
+
+        var chapters: [PdfChapter] = []
+        for (index, start) in chapterStarts.enumerated() {
+            let endPageIndex = index + 1 < chapterStarts.count
+                ? chapterStarts[index + 1].pageIndex - 1
+                : pages.last!.pageIndex
+            guard start.pageIndex <= endPageIndex else { continue }
+
+            let range = start.pageIndex...endPageIndex
+            let sourcePages = pagesInRange(range, from: pages)
+            let combined = sourcePages.map(\.text).joined(separator: "\n\n")
+            let html = PdfTextCleaner.htmlWrap(combined, title: start.title)
+
+            chapters.append(PdfChapter(
+                title: start.title,
+                pageRange: range,
+                order: index,
+                plainText: combined,
+                htmlPreview: html,
+                confidence: averageConfidence(of: sourcePages),
+                isOCRSourced: sourcePages.contains(where: \.isOCRSourced)
+            ))
+        }
+        return chapters
+    }
+
+    private func buildFallbackPageChunks(pages: [PdfPageContent]) -> [PdfChapter] {
+        let chunkSize = 25
+        var chapters: [PdfChapter] = []
+        var order = 0
+
+        for startOffset in stride(from: 0, to: pages.count, by: chunkSize) {
+            let endOffset = min(startOffset + chunkSize, pages.count)
+            let sourcePages = Array(pages[startOffset..<endOffset])
+            guard let firstPage = sourcePages.first, let lastPage = sourcePages.last else { continue }
+
+            let combined = sourcePages.map(\.text).joined(separator: "\n\n")
+            guard !combined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+
+            let title = order == 0 ? "Beginning" : "Section \(order + 1)"
+            let html = PdfTextCleaner.htmlWrap(combined, title: title)
+            chapters.append(PdfChapter(
+                title: title,
+                pageRange: firstPage.pageIndex...lastPage.pageIndex,
+                order: order,
+                plainText: combined,
+                htmlPreview: html,
+                confidence: averageConfidence(of: sourcePages),
+                isOCRSourced: sourcePages.contains(where: \.isOCRSourced)
+            ))
+            order += 1
+        }
+
+        if chapters.isEmpty, let firstPage = pages.first, let lastPage = pages.last {
+            let allText = pages.map(\.text).joined(separator: "\n\n")
+            let html = PdfTextCleaner.htmlWrap(allText, title: "Full Text")
+            return [PdfChapter(
+                title: "Full Text",
+                pageRange: firstPage.pageIndex...lastPage.pageIndex,
+                order: 0,
+                plainText: allText,
+                htmlPreview: html,
+                confidence: averageConfidence(of: pages),
+                isOCRSourced: pages.contains(where: \.isOCRSourced)
+            )]
+        }
+
+        return chapters
+    }
+
+    private func pagesInRange(
+        _ range: ClosedRange<Int>,
+        from pages: [PdfPageContent]
+    ) -> [PdfPageContent] {
+        pages.filter { range.contains($0.pageIndex) }
+    }
+
+    private func averageConfidence(of pages: [PdfPageContent]) -> Double {
+        guard !pages.isEmpty else { return 1 }
+        return pages.map(\.confidence).reduce(0, +) / Double(pages.count)
     }
 }
 
 private extension String {
-    var nonEmpty: String? { trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : self }
+    var nonEmpty: String? {
+        trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : self
+    }
 }
