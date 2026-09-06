@@ -11,7 +11,10 @@ public struct PdfMetadata: Sendable {
     public var modificationDate: Date?
     public var pageCount: Int
     public var isScanned: Bool
-    public var detectedLanguage: String = "en"
+
+    /// Detected document language when the parser actually has a reliable signal.
+    /// `nil` means unknown; the package no longer pretends every PDF is English.
+    public var detectedLanguage: String?
 
     public init(
         title: String = "Untitled",
@@ -23,7 +26,8 @@ public struct PdfMetadata: Sendable {
         creationDate: Date? = nil,
         modificationDate: Date? = nil,
         pageCount: Int = 0,
-        isScanned: Bool = false
+        isScanned: Bool = false,
+        detectedLanguage: String? = nil
     ) {
         self.title = title
         self.authors = authors
@@ -35,6 +39,7 @@ public struct PdfMetadata: Sendable {
         self.modificationDate = modificationDate
         self.pageCount = pageCount
         self.isScanned = isScanned
+        self.detectedLanguage = detectedLanguage
     }
 
     public var authorString: String {
