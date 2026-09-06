@@ -6,7 +6,7 @@
 - [x] Phase 3 - multilingual, selective, configurable OCR
 - [x] Phase 4 - audiobook-oriented document cleanup
 - [x] Phase 5 - TTS segmentation and exact source mapping
-- [ ] Phase 6 - concurrency, cancellation, and progressive parsing
+- [x] Phase 6 - concurrency, cancellation, and progressive parsing
 - [ ] Phase 7 - platform cleanup and package polish
 - [ ] Phase 8 - Spokio integration validation
 
