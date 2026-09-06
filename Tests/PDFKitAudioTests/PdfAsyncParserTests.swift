@@ -17,7 +17,10 @@ final class PdfAsyncParserTests: XCTestCase {
         XCTAssertEqual(asynchronousBook.metadata.pageCount, synchronousBook.metadata.pageCount)
         XCTAssertEqual(asynchronousBook.metadata.isScanned, synchronousBook.metadata.isScanned)
         XCTAssertEqual(asynchronousBook.pages, synchronousBook.pages)
-        XCTAssertEqual(asynchronousBook.chapters, synchronousBook.chapters)
+        XCTAssertEqual(
+            asynchronousBook.chapters.map(ChapterSnapshot.init),
+            synchronousBook.chapters.map(ChapterSnapshot.init)
+        )
         XCTAssertEqual(asynchronousBook.allPlainText(), synchronousBook.allPlainText())
     }
 
@@ -116,6 +119,24 @@ final class PdfAsyncParserTests: XCTestCase {
         )
         XCTAssertEqual(bounded.completedPages, 4)
         XCTAssertEqual(bounded.pageFractionCompleted, 1)
+    }
+}
+
+private struct ChapterSnapshot: Equatable {
+    let title: String
+    let pageRange: ClosedRange<Int>
+    let order: Int
+    let plainText: String
+    let confidence: Double
+    let isOCRSourced: Bool
+
+    init(_ chapter: PdfChapter) {
+        title = chapter.title
+        pageRange = chapter.pageRange
+        order = chapter.order
+        plainText = chapter.plainText
+        confidence = chapter.confidence
+        isOCRSourced = chapter.isOCRSourced
     }
 }
 
