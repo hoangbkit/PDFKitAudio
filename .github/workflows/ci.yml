@@ -23,8 +23,6 @@ jobs:
         run: swift --version
 
       - name: Run package tests
-        env:
-          PDFKITAUDIO_RUN_LAYOUT_BENCHMARKS: "1"
         run: swift test
 
       - name: Install XcodeGen
