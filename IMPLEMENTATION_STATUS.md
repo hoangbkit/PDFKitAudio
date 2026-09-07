@@ -5,7 +5,7 @@ This PR started as a planning-only change and is now implementing the approved p
 - [x] Phase 0 — baseline, deterministic layout fixture system, quality metrics, and benchmark harness
 - [x] Phase 1 — unified positioned-fragment extraction
 - [x] Phase 2 — page complexity detector and fast-path gate
-- [ ] Phase 3 — fragment-to-line and line-to-block reconstruction
+- [x] Phase 3 — fragment-to-line and line-to-block reconstruction
 - [ ] Phase 4 — columns, spanning regions, and vertical segmentation
 - [ ] Phase 5 — reading-order DAG and deterministic resolver
 - [ ] Phase 6 — lightweight role classification and special structures
@@ -47,5 +47,22 @@ This PR started as a planning-only change and is now implementing the approved p
 - The complete deterministic fixture matrix has an explicit analyze/fast-path expectation, with real PDFKit tests verifying both a two-column page and a simple page.
 - Phase 2 does not change `PdfParser` selected text, cleanup, chaptering, or TTS output; analyzer integration remains deferred to Phase 8.
 - Normal CI keeps stress benchmarks opt-in; the Phase 2 gate passed SwiftPM tests and the generated macOS example-app build on macOS 14.
+
+### Phase 3
+
+- Added internal `PdfLayoutLine`, `PdfLayoutBlock`, and explicit left-to-right/right-to-left writing-direction models.
+- Fragment-to-line reconstruction uses adaptive vertical overlap/center tolerances, with conservative superscript/subscript attachment only when small fragments are both vertically close and horizontally adjacent.
+- Row candidates split at strong horizontal gaps before line construction so clearly separated columns or side regions do not become a single logical line.
+- Within-line ordering follows dominant writing direction; reconstructed spacing uses source-boundary whitespace, geometry-derived character gaps, punctuation adjacency, and CJK-specific no-space handling.
+- Line-to-block reconstruction keeps multiple compatible active lanes rather than relying only on immediately adjacent geometry order, allowing interleaved left/right rows to remain separate while each lane can still form coherent blocks.
+- Paragraph first-line indentation and hanging indentation remain mergeable; strong font/emphasis transitions separate headings and footnotes from body text.
+- Explicit list markers start distinct blocks while wrapped continuation lines remain attached to their item.
+- Side-by-side low-overlap lines, narrow sidebars, and strong-gutter columns are prevented from merging into one paragraph-like block.
+- Block text preserves reconstructed line breaks and hyphen evidence so `PdfTextCleaner` remains responsible for downstream audiobook cleanup/dehyphenation.
+- Tests cover split runs, geometry-derived spaces, punctuation, source whitespace, superscripts, CJK, RTL, paragraph indentation, hanging indentation, lists, headings, footnotes, sidebars, strong gutters, and preserved hyphen evidence.
+- All supported deterministic fixtures are checked for stable repeated output and structural text conservation: every input fragment ID appears exactly once in lines and blocks.
+- A real generated PDFKit two-column fixture verifies that actual extracted fragments never produce a block crossing a strong column gutter.
+- Phase 3 remains internal and does not alter `PdfParser` selected text or public API; parser/analyzer integration remains deferred to Phase 8.
+- The Phase 3 gate passed SwiftPM tests and the generated macOS example-app build on macOS 14.
 
 Each phase is marked complete only after its exit criteria are satisfied and CI is green.
