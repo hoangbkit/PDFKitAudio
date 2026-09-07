@@ -16,6 +16,11 @@ let package = Package(
         .target(
             name: "PDFKitAudio",
             path: "Sources/PDFKitAudio"
+        ),
+        .testTarget(
+            name: "PDFKitAudioTests",
+            dependencies: ["PDFKitAudio"],
+            path: "Tests/PDFKitAudioTests"
         )
     ]
 )

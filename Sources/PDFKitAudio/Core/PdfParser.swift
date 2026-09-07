@@ -1,110 +1,259 @@
+import AppKit
 import Foundation
 import PDFKit
-import AppKit
 
-public enum OCROptions: Sendable {
-    case auto      // trigger only when page has little/no extractable text
-    case always    // force OCR every page (best quality for scanned)
-    case never     // never OCR, digital PDFs only
-}
+/// macOS PDF parser optimized for document-to-audio ingestion.
+///
+/// The parser itself is immutable and Sendable. Each parse execution creates and
+/// confines its own `PDFDocument`; PDFKit page access remains serial within that
+/// execution instead of sharing a document across concurrent tasks.
+public final class PdfParser: Sendable {
+    typealias OCRRecognizer = @Sendable (PDFPage, PdfOCRConfiguration) -> PdfOCREngine.OCRResult?
+    public typealias ProgressHandler = @Sendable (PdfParseProgress) -> Void
 
-public final class PdfParser: @unchecked Sendable {
-    private let ocrMode: OCROptions
-    private let ocrThreshold: Int // chars below which we trigger OCR in auto mode
+    public let configuration: PdfParserConfiguration
 
-    public init(ocrMode: OCROptions = .auto, ocrThreshold: Int = 60) {
-        self.ocrMode = ocrMode
-        self.ocrThreshold = ocrThreshold
+    /// Compatibility aliases for callers that previously read individual parser
+    /// settings directly. New code should prefer `configuration`.
+    public var ocrConfiguration: PdfOCRConfiguration { configuration.ocr }
+    public var cleanupConfiguration: PdfCleanupConfiguration { configuration.cleanup }
+    public var extractCoverImage: Bool { configuration.extractCoverImage }
+    public var retainNativeText: Bool { configuration.retainNativeText }
+
+    private let ocrRecognizer: OCRRecognizer
+
+    /// Backward-compatible initializer for existing callers.
+    public init(
+        ocrMode: OCROptions = .auto,
+        ocrThreshold: Int = 20,
+        cleanupConfiguration: PdfCleanupConfiguration = .audiobookDefault,
+        extractCoverImage: Bool = true
+    ) {
+        self.configuration = PdfParserConfiguration(
+            ocr: PdfOCRConfiguration(
+                mode: ocrMode,
+                nativeTextThreshold: ocrThreshold
+            ),
+            cleanup: cleanupConfiguration,
+            extractCoverImage: extractCoverImage
+        )
+        self.ocrRecognizer = { page, configuration in
+            PdfOCREngine.recognize(page: page, configuration: configuration)
+        }
     }
 
+    /// Compatibility initializer for callers that already configure OCR directly.
+    public init(
+        ocrConfiguration: PdfOCRConfiguration,
+        cleanupConfiguration: PdfCleanupConfiguration = .audiobookDefault,
+        extractCoverImage: Bool = true
+    ) {
+        self.configuration = PdfParserConfiguration(
+            ocr: ocrConfiguration,
+            cleanup: cleanupConfiguration,
+            extractCoverImage: extractCoverImage
+        )
+        self.ocrRecognizer = { page, configuration in
+            PdfOCREngine.recognize(page: page, configuration: configuration)
+        }
+    }
+
+    /// Preferred consolidated initializer.
+    public init(configuration: PdfParserConfiguration) {
+        self.configuration = configuration
+        self.ocrRecognizer = { page, configuration in
+            PdfOCREngine.recognize(page: page, configuration: configuration)
+        }
+    }
+
+    /// Test seam that keeps OCR invocation/selection behavior directly verifiable.
+    init(
+        ocrConfiguration: PdfOCRConfiguration,
+        cleanupConfiguration: PdfCleanupConfiguration = .audiobookDefault,
+        extractCoverImage: Bool = true,
+        retainNativeText: Bool = true,
+        ocrRecognizer: @escaping OCRRecognizer
+    ) {
+        self.configuration = PdfParserConfiguration(
+            ocr: ocrConfiguration,
+            cleanup: cleanupConfiguration,
+            extractCoverImage: extractCoverImage,
+            retainNativeText: retainNativeText
+        )
+        self.ocrRecognizer = ocrRecognizer
+    }
+
+    // MARK: - Synchronous API
+
+    /// Synchronous compatibility API.
+    ///
+    /// Prefer the async API for UI-driven or cancellable imports. This method
+    /// intentionally does not inherit Swift task cancellation semantics.
     public func parse(at url: URL) throws -> PdfBook {
-        guard FileManager.default.fileExists(atPath: url.path) else { throw PdfError.fileNotFound }
-        guard let doc = PDFDocument(url: url) else { throw PdfError.invalidPDF }
-        return try parse(document: doc, fileURL: url)
+        try parseFile(at: url, control: .synchronous)
     }
 
+    /// Synchronous compatibility API.
     public func parse(data: Data) throws -> PdfBook {
-        guard let doc = PDFDocument(data: data) else { throw PdfError.invalidPDF }
-        return try parse(document: doc, fileURL: nil)
+        try parseData(data, control: .synchronous)
     }
 
-    private func parse(document: PDFDocument, fileURL: URL?) throws -> PdfBook {
-        if document.isEncrypted || document.isLocked { throw PdfError.passwordProtected }
+    // MARK: - Asynchronous API
+
+    /// Parses a PDF asynchronously with explicit progress reporting.
+    ///
+    /// `progress` intentionally has no default value. That keeps existing
+    /// synchronous `parse(at:)` calls source-compatible even when they appear
+    /// inside an async function. Use `parseAsync(at:)` when progress is not needed.
+    ///
+    /// The parser keeps PDFKit page access serial and checks Swift task
+    /// cancellation between page-sized operations. Progress callbacks execute on
+    /// the parser task's executor; UI callers should hop to `MainActor` before
+    /// mutating UI state.
+    public func parse(
+        at url: URL,
+        progress: ProgressHandler?
+    ) async throws -> PdfBook {
+        try Task.checkCancellation()
+        return try parseFile(at: url, control: .asynchronous(progress: progress))
+    }
+
+    /// Data equivalent of the progress-reporting async URL API.
+    public func parse(
+        data: Data,
+        progress: ProgressHandler?
+    ) async throws -> PdfBook {
+        try Task.checkCancellation()
+        return try parseData(data, control: .asynchronous(progress: progress))
+    }
+
+    /// Convenience async API when the caller does not need progress callbacks.
+    public func parseAsync(
+        at url: URL,
+        progress: ProgressHandler? = nil
+    ) async throws -> PdfBook {
+        try await parse(at: url, progress: progress)
+    }
+
+    /// Data equivalent of `parseAsync(at:progress:)`.
+    public func parseAsync(
+        data: Data,
+        progress: ProgressHandler? = nil
+    ) async throws -> PdfBook {
+        try await parse(data: data, progress: progress)
+    }
+
+    // MARK: - Shared parse core
+
+    private func parseFile(at url: URL, control: ParseControl) throws -> PdfBook {
+        try control.checkpoint()
+        control.report(stage: .loading, completedPages: 0, totalPages: 0)
+
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw PdfError.fileNotFound
+        }
+        try control.checkpoint()
+        guard let document = PDFDocument(url: url) else {
+            throw PdfError.invalidPDF
+        }
+        try control.checkpoint()
+        return try parse(document: document, fileURL: url, control: control)
+    }
+
+    private func parseData(_ data: Data, control: ParseControl) throws -> PdfBook {
+        try control.checkpoint()
+        control.report(stage: .loading, completedPages: 0, totalPages: 0)
+
+        guard let document = PDFDocument(data: data) else {
+            throw PdfError.invalidPDF
+        }
+        try control.checkpoint()
+        return try parse(document: document, fileURL: nil, control: control)
+    }
+
+    private func parse(
+        document: PDFDocument,
+        fileURL: URL?,
+        control: ParseControl
+    ) throws -> PdfBook {
+        try control.checkpoint()
+        if document.isEncrypted || document.isLocked {
+            throw PdfError.passwordProtected
+        }
 
         let pageCount = document.pageCount
-        let attrs = document.documentAttributes ?? [:]
+        let attributes = document.documentAttributes ?? [:]
 
-        let title = (attrs[PDFDocumentAttribute.titleAttribute] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? fileURL?.deletingPathExtension().lastPathComponent ?? "Untitled"
-        let authorString = attrs[PDFDocumentAttribute.authorAttribute] as? String
-        let authors = authorString?.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) } ?? []
-        let subject = attrs[PDFDocumentAttribute.subjectAttribute] as? String
-        let creator = attrs[PDFDocumentAttribute.creatorAttribute] as? String
-        let producer = attrs[PDFDocumentAttribute.producerAttribute] as? String
-        let creationDate = attrs[PDFDocumentAttribute.creationDateAttribute] as? Date
-        let modDate = attrs[PDFDocumentAttribute.modificationDateAttribute] as? Date
-        let keywordsRaw = attrs[PDFDocumentAttribute.keywordsAttribute] as? String
-        let keywords = keywordsRaw?.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) } ?? []
+        let title = (attributes[PDFDocumentAttribute.titleAttribute] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
+            ?? fileURL?.deletingPathExtension().lastPathComponent
+            ?? "Untitled"
+        let authorString = attributes[PDFDocumentAttribute.authorAttribute] as? String
+        let authors = authorString?.components(separatedBy: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) } ?? []
+        let subject = attributes[PDFDocumentAttribute.subjectAttribute] as? String
+        let creator = attributes[PDFDocumentAttribute.creatorAttribute] as? String
+        let producer = attributes[PDFDocumentAttribute.producerAttribute] as? String
+        let creationDate = attributes[PDFDocumentAttribute.creationDateAttribute] as? Date
+        let modificationDate = attributes[PDFDocumentAttribute.modificationDateAttribute] as? Date
+        let keywordsRaw = attributes[PDFDocumentAttribute.keywordsAttribute] as? String
+        let keywords = keywordsRaw?.components(separatedBy: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) } ?? []
 
-        // TOC
-        let toc = PdfTOCParser.parse(document: document)
+        // Keep PDFKit access confined to this single parse execution. Pages are
+        // intentionally processed one at a time rather than concurrently because
+        // PDFDocument/PDFPage do not provide a strong cross-thread safety contract.
+        control.report(stage: .extracting, completedPages: 0, totalPages: pageCount)
+        var pages: [PdfPageContent] = []
+        pages.reserveCapacity(pageCount)
 
-        // Detect scanned
-        let isScannedOverall = PdfOCREngine.isScanned(document: document)
-
-        // Cover
-        let coverData: Data? = {
-            guard let first = document.page(at: 0) else { return nil }
-            let thumb = first.thumbnail(of: CGSize(width: 600, height: 800), for: .mediaBox)
-            guard let tiff = thumb.tiffRepresentation else { return nil }
-            return NSBitmapImageRep(data: tiff)?.representation(using: .jpeg, properties: [:])
-        }()
-
-        // Extract pages with auto OCR logic
-        var pagesText: [(text: String, confidence: Double, isOCR: Bool)] = []
-        pagesText.reserveCapacity(pageCount)
-
-        for i in 0..<pageCount {
-            guard let page = document.page(at: i) else { continue }
-            let raw = page.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            var finalText = raw
-            var confidence = 1.0
-            var isOCR = false
-
-            let shouldOCR: Bool = {
-                switch ocrMode {
-                case .always: return true
-                case .never: return false
-                case .auto: return raw.count < ocrThreshold
-                }
-            }()
-
-            if shouldOCR {
-                if let ocr = PdfOCREngine.recognize(page: page), !ocr.text.isEmpty {
-                    // Prefer OCR if it yields significantly more text
-                    if ocr.text.count > raw.count * 2 || raw.count < ocrThreshold {
-                        finalText = ocr.text
-                        confidence = ocr.confidence
-                        isOCR = true
-                    }
-                } else if raw.isEmpty {
-                    // OCR failed but page is empty, keep empty to avoid breaking flow
-                    finalText = ""
-                    confidence = 0
-                    isOCR = true
-                }
+        for pageIndex in 0..<pageCount {
+            try control.checkpoint()
+            let content = try autoreleasepool {
+                try extractPage(
+                    document.page(at: pageIndex),
+                    pageIndex: pageIndex,
+                    control: control
+                )
             }
-
-            let cleaned = PdfTextCleaner.clean(finalText)
-            pagesText.append((cleaned, confidence, isOCR))
+            pages.append(content)
+            control.report(
+                stage: .extracting,
+                completedPages: pageIndex + 1,
+                totalPages: pageCount
+            )
         }
 
-        // Build chapters
-        let chapters: [PdfChapter]
-        if !toc.isEmpty {
-            chapters = buildChaptersFromTOC(toc: toc, pagesText: pagesText, pageCount: pageCount)
-        } else {
-            chapters = buildChaptersHeuristic(pagesText: pagesText)
+        try control.checkpoint()
+        control.report(stage: .cleaning, completedPages: pageCount, totalPages: pageCount)
+        pages = PdfDocumentTextCleaner.clean(
+            pages,
+            configuration: cleanupConfiguration
+        )
+
+        // Scanned-document metadata needs the raw native extraction signal. Compute
+        // it before optionally dropping retained native text from the final book.
+        let isScannedOverall = isLikelyScanned(pages: pages)
+        if !retainNativeText {
+            pages = pages.map { page in
+                PdfPageContent(
+                    pageIndex: page.pageIndex,
+                    nativeText: "",
+                    text: page.text,
+                    extractionSource: page.extractionSource,
+                    confidence: page.confidence
+                )
+            }
         }
+
+        try control.checkpoint()
+        control.report(stage: .buildingChapters, completedPages: pageCount, totalPages: pageCount)
+
+        // Parse navigation only after page extraction so large outline trees do
+        // not delay the first useful page result/progress update.
+        let tableOfContents = PdfTOCParser.parse(document: document)
+        try control.checkpoint()
+        let chapters = PdfChapterBuilder.build(toc: tableOfContents, pages: pages)
 
         let metadata = PdfMetadata(
             title: title,
@@ -114,103 +263,169 @@ public final class PdfParser: @unchecked Sendable {
             creator: creator,
             producer: producer,
             creationDate: creationDate,
-            modificationDate: modDate,
+            modificationDate: modificationDate,
             pageCount: pageCount,
-            isScanned: isScannedOverall
+            isScanned: isScannedOverall,
+            detectedLanguage: nil
         )
 
-        return PdfBook(metadata: metadata, chapters: chapters, toc: toc, cover: coverData, fileURL: fileURL)
+        try control.checkpoint()
+        control.report(stage: .finishing, completedPages: pageCount, totalPages: pageCount)
+        let coverData = extractCoverImage ? extractCover(from: document) : nil
+        try control.checkpoint()
+
+        let book = PdfBook(
+            metadata: metadata,
+            pages: pages,
+            chapters: chapters,
+            toc: tableOfContents,
+            cover: coverData,
+            fileURL: fileURL
+        )
+
+        control.report(stage: .finished, completedPages: pageCount, totalPages: pageCount)
+        return book
     }
 
-    private func buildChaptersFromTOC(toc: [PdfTOCItem], pagesText: [(text:String, confidence:Double, isOCR:Bool)], pageCount: Int) -> [PdfChapter] {
-        // Flatten TOC to sorted page indices
-        var flat: [PdfTOCItem] = []
-        func flatten(_ items: [PdfTOCItem]) { for it in items { flat.append(it); flatten(it.children) } }
-        flatten(toc)
-        let sorted = flat.sorted { $0.pageIndex < $1.pageIndex }
-
-        var chapters: [PdfChapter] = []
-        for (idx, item) in sorted.enumerated() {
-            let start = max(0, min(item.pageIndex, pageCount-1))
-            let end: Int
-            if idx + 1 < sorted.count { end = max(start, min(sorted[idx+1].pageIndex - 1, pageCount-1)) }
-            else { end = pageCount - 1 }
-
-            let range = start...end
-            let texts = range.compactMap { i in i < pagesText.count ? pagesText[i] : nil }
-            let combined = texts.map { $0.text }.joined(separator: "\n\n")
-            guard !combined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
-            let avgConf = texts.isEmpty ? 1.0 : texts.map { $0.confidence }.reduce(0, +) / Double(texts.count)
-            let isOCR = texts.contains { $0.isOCR }
-            let html = PdfTextCleaner.htmlWrap(combined, title: item.title)
-            chapters.append(PdfChapter(title: item.title, pageRange: range, order: idx, plainText: combined, htmlPreview: html, confidence: avgConf, isOCRSourced: isOCR))
+    private func extractPage(
+        _ page: PDFPage?,
+        pageIndex: Int,
+        control: ParseControl
+    ) throws -> PdfPageContent {
+        try control.checkpoint()
+        guard let page else {
+            return PdfPageContent(
+                pageIndex: pageIndex,
+                nativeText: "",
+                text: "",
+                extractionSource: .empty,
+                confidence: 0
+            )
         }
-        if chapters.isEmpty { return buildChaptersHeuristic(pagesText: pagesText) }
-        return chapters
+
+        let nativeText = page.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        var selectedText = nativeText
+        var source: PdfExtractionSource = nativeText.isEmpty ? .empty : .native
+        var confidence = nativeText.isEmpty ? 0.0 : 1.0
+
+        if PdfOCRPolicy.shouldRunOCR(
+            nativeText: nativeText,
+            configuration: ocrConfiguration
+        ) {
+            // One OCR page is the maximum non-interruptible unit. Cancellation is
+            // checked immediately before rendering/Vision work and again as soon
+            // as the recognizer returns.
+            try control.checkpoint()
+            let ocrResult = ocrRecognizer(page, ocrConfiguration)
+            try control.checkpoint()
+
+            if let ocrResult,
+               PdfOCRPolicy.shouldPreferOCR(
+                   ocrText: ocrResult.text,
+                   confidence: ocrResult.confidence,
+                   nativeText: nativeText,
+                   configuration: ocrConfiguration
+               ) {
+                selectedText = ocrResult.text
+                source = .ocr
+                confidence = ocrResult.confidence
+            }
+        }
+
+        let cleanedText = PdfTextCleaner.cleanPage(
+            selectedText,
+            configuration: cleanupConfiguration
+        )
+        if cleanedText.isEmpty {
+            source = .empty
+            confidence = 0
+        }
+
+        return PdfPageContent(
+            pageIndex: pageIndex,
+            nativeText: nativeText,
+            text: cleanedText,
+            extractionSource: source,
+            confidence: confidence
+        )
     }
 
-    private func buildChaptersHeuristic(pagesText: [(text:String, confidence:Double, isOCR:Bool)]) -> [PdfChapter] {
-        // Simple heuristic: detect "Chapter" headings or split every 20 pages
-        var chapterStarts: [(index:Int, title:String)] = []
-        let chapterRegex = try? NSRegularExpression(pattern: "^(Chapter|CHAPTER|Part|PART)\\s+[\\dIVX]+.*$", options: [.anchorsMatchLines])
+    private func extractCover(from document: PDFDocument) -> Data? {
+        autoreleasepool {
+            guard let first = document.page(at: 0) else { return nil }
+            let thumbnail = first.thumbnail(
+                of: CGSize(width: 600, height: 800),
+                for: .mediaBox
+            )
+            guard let tiff = thumbnail.tiffRepresentation else { return nil }
+            return NSBitmapImageRep(data: tiff)?.representation(
+                using: .jpeg,
+                properties: [:]
+            )
+        }
+    }
 
-        for (i, page) in pagesText.enumerated() {
-            let firstLines = page.text.components(separatedBy: .newlines).prefix(4)
-            for line in firstLines {
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if trimmed.count > 5 && trimmed.count < 120 {
-                    if let regex = chapterRegex, regex.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed)) != nil {
-                        chapterStarts.append((i, trimmed))
-                        break
-                    }
-                }
+    /// Reuses the original lightweight scanned-document heuristic without
+    /// touching PDFKit pages a second time after extraction.
+    private func isLikelyScanned(
+        pages: [PdfPageContent],
+        sampleCount: Int = 5
+    ) -> Bool {
+        guard !pages.isEmpty, sampleCount > 0 else { return false }
+
+        let step = max(1, pages.count / sampleCount)
+        var weakNativePages = 0
+        var checked = 0
+        for index in stride(from: 0, to: pages.count, by: step).prefix(sampleCount) {
+            if pages[index].nativeText.count < 30 {
+                weakNativePages += 1
             }
+            checked += 1
         }
 
-        if chapterStarts.isEmpty {
-            // Fallback: chunk every 25 pages as a chapter
-            var chapters: [PdfChapter] = []
-            let chunkSize = 25
-            var order = 0
-            for start in stride(from: 0, to: pagesText.count, by: chunkSize) {
-                let end = min(start + chunkSize - 1, pagesText.count - 1)
-                let slice = pagesText[start...end]
-                let combined = slice.map { $0.text }.joined(separator: "\n\n")
-                guard !combined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
-                let conf = slice.map { $0.confidence }.reduce(0, +) / Double(slice.count)
-                let isOCR = slice.contains { $0.isOCR }
-                let title = order == 0 ? "Beginning" : "Section \(order+1)"
-                let html = PdfTextCleaner.htmlWrap(combined, title: title)
-                chapters.append(PdfChapter(title: title, pageRange: start...end, order: order, plainText: combined, htmlPreview: html, confidence: conf, isOCRSourced: isOCR))
-                order += 1
+        return checked > 0 && Double(weakNativePages) / Double(checked) >= 0.6
+    }
+}
+
+private struct ParseControl {
+    let progress: PdfParser.ProgressHandler?
+    let checkCancellation: () throws -> Void
+
+    static let synchronous = ParseControl(
+        progress: nil,
+        checkCancellation: {}
+    )
+
+    static func asynchronous(
+        progress: PdfParser.ProgressHandler?
+    ) -> ParseControl {
+        ParseControl(
+            progress: progress,
+            checkCancellation: {
+                try Task.checkCancellation()
             }
-            if chapters.isEmpty {
-                // Single chapter whole book
-                let all = pagesText.map { $0.text }.joined(separator: "\n\n")
-                let conf = pagesText.isEmpty ? 1.0 : pagesText.map { $0.confidence }.reduce(0, +) / Double(pagesText.count)
-                let isOCR = pagesText.contains { $0.isOCR }
-                let html = PdfTextCleaner.htmlWrap(all, title: "Full Text")
-                return [PdfChapter(title: "Full Text", pageRange: 0...max(0, pagesText.count-1), order: 0, plainText: all, htmlPreview: html, confidence: conf, isOCRSourced: isOCR)]
-            }
-            return chapters
-        } else {
-            var chapters: [PdfChapter] = []
-            for (idx, start) in chapterStarts.enumerated() {
-                let startIdx = start.index
-                let endIdx = idx + 1 < chapterStarts.count ? chapterStarts[idx+1].index - 1 : pagesText.count - 1
-                guard startIdx <= endIdx else { continue }
-                let slice = pagesText[startIdx...endIdx]
-                let combined = slice.map { $0.text }.joined(separator: "\n\n")
-                let conf = slice.map { $0.confidence }.reduce(0, +) / Double(slice.count)
-                let isOCR = slice.contains { $0.isOCR }
-                let html = PdfTextCleaner.htmlWrap(combined, title: start.title)
-                chapters.append(PdfChapter(title: start.title, pageRange: startIdx...endIdx, order: idx, plainText: combined, htmlPreview: html, confidence: conf, isOCRSourced: isOCR))
-            }
-            return chapters
-        }
+        )
+    }
+
+    func checkpoint() throws {
+        try checkCancellation()
+    }
+
+    func report(
+        stage: PdfParseStage,
+        completedPages: Int,
+        totalPages: Int
+    ) {
+        progress?(PdfParseProgress(
+            stage: stage,
+            completedPages: completedPages,
+            totalPages: totalPages
+        ))
     }
 }
 
 private extension String {
-    var nonEmpty: String? { trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : self }
+    var nonEmpty: String? {
+        trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : self
+    }
 }
