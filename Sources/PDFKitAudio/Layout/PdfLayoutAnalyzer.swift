@@ -76,7 +76,12 @@ enum PdfLayoutAnalyzer {
         try checkpoint()
         let layout = PdfLayoutRegionDetector.segment(blocks: blocks)
         let rawSpecial = PdfLayoutRoleClassifier.analyze(blocks: blocks, layout: layout)
-        let special = reconciledSpecialStructures(rawSpecial, assessment: assessment)
+        let special = reconciledSpecialStructures(
+            rawSpecial,
+            assessment: assessment,
+            blocks: blocks,
+            layout: layout
+        )
         guard Set(special.assignments.map(\.blockID)) == Set(blocks.map(\.id)),
               special.assignments.count == blocks.count else {
             return nil
@@ -173,16 +178,26 @@ enum PdfLayoutAnalyzer {
         return false
     }
 
-    /// Phase 6 has a conservative compact-grid table fallback for cases where the
-    /// Phase 2 detector is uncertain. It must never override a positive Phase 2
-    /// multi-column classification: doing so turns three-column prose into a
-    /// row-major table. Reconcile that one contradictory interpretation here.
+    /// Phase 2 and Phase 6 intentionally use different evidence. PDFKit line
+    /// wrapping can make ordinary multi-column prose resemble a compact grid to
+    /// the early detector/table classifier. When Phase 4 has reconstructed clear
+    /// columns and the PDF content stream itself is serialized column-by-column,
+    /// that is strong evidence for prose columns rather than a row-major table.
     private static func reconciledSpecialStructures(
         _ analysis: PdfSpecialStructureAnalysis,
-        assessment: PdfLayoutComplexityAssessment
+        assessment: PdfLayoutComplexityAssessment,
+        blocks: [PdfLayoutBlock],
+        layout: PdfPageRegionLayout
     ) -> PdfSpecialStructureAnalysis {
-        guard assessment.complexity == .likelyMultiColumn,
-              !analysis.tables.isEmpty else {
+        guard !analysis.tables.isEmpty else { return analysis }
+
+        let detectorAlreadySaysColumns = assessment.complexity == .likelyMultiColumn
+        let reconstructedColumnarProse = tableGridIsActuallyColumnarProse(
+            analysis: analysis,
+            blocks: blocks,
+            layout: layout
+        )
+        guard detectorAlreadySaysColumns || reconstructedColumnarProse else {
             return analysis
         }
 
@@ -198,7 +213,7 @@ enum PdfLayoutAnalyzer {
                 blockID: assignment.blockID,
                 role: .body,
                 confidence: 0.72,
-                signals: ["Phase 2 multi-column classification outranks table-grid fallback"]
+                signals: ["column reconstruction/source serialization outranks table-grid fallback"]
             )
         }
 
@@ -207,6 +222,48 @@ enum PdfLayoutAnalyzer {
             tables: [],
             readingOrderHints: analysis.readingOrderHints
         )
+    }
+
+    private static func tableGridIsActuallyColumnarProse(
+        analysis: PdfSpecialStructureAnalysis,
+        blocks: [PdfLayoutBlock],
+        layout: PdfPageRegionLayout
+    ) -> Bool {
+        guard layout.primaryColumnCount >= 2,
+              layout.primaryColumnCount <= 3,
+              let region = layout.regions.first(where: { $0.kind == .columnar && $0.columns.count >= 2 }) else {
+            return false
+        }
+
+        let blockByID = Dictionary(uniqueKeysWithValues: blocks.map { ($0.id, $0) })
+        let tableIDs = analysis.tables.reduce(into: Set<Int>()) { $0.formUnion($1.blockIDs) }
+        let orderedColumns = region.columns.sorted { lhs, rhs in
+            if lhs.rect.minX != rhs.rect.minX { return lhs.rect.minX < rhs.rect.minX }
+            return lhs.id < rhs.id
+        }
+        guard orderedColumns.allSatisfy({ $0.blockIDs.count >= 2 }) else { return false }
+
+        let primaryIDs = Set(orderedColumns.flatMap(\.blockIDs))
+        let covered = primaryIDs.intersection(tableIDs).count
+        guard !primaryIDs.isEmpty,
+              Double(covered) / Double(primaryIDs.count) >= 0.80 else {
+            return false
+        }
+
+        let orderRanges: [(min: Int, max: Int)] = orderedColumns.compactMap { column in
+            let orders = column.blockIDs.compactMap { blockByID[$0]?.sourceOrder }
+            guard let minimum = orders.min(), let maximum = orders.max() else { return nil }
+            return (minimum, maximum)
+        }
+        guard orderRanges.count == orderedColumns.count else { return false }
+
+        let ascending = zip(orderRanges, orderRanges.dropFirst()).allSatisfy { lhs, rhs in
+            lhs.max < rhs.min
+        }
+        let descending = zip(orderRanges, orderRanges.dropFirst()).allSatisfy { lhs, rhs in
+            lhs.min > rhs.max
+        }
+        return ascending || descending
     }
 
     private static func materialize(
