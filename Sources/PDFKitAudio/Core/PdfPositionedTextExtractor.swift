@@ -15,28 +15,173 @@ enum PdfPositionedTextExtractor {
         let lineSelections = selection.selectionsByLine()
         var fragments: [PdfLayoutFragment] = []
         fragments.reserveCapacity(lineSelections.count)
+        var sourceOrder = 0
 
-        for (sourceOrder, lineSelection) in lineSelections.enumerated() {
-            guard let rawText = lineSelection.string else { continue }
-            let text = rawText.trimmingCharacters(in: .newlines)
-            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+        for lineSelection in lineSelections {
+            let subselections = nativeSubselections(for: lineSelection, page: page)
+            for subsection in subselections {
+                guard let rawText = subsection.string else { continue }
+                let text = rawText.trimmingCharacters(in: .newlines)
+                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
 
-            let rawBounds = lineSelection.bounds(for: page)
-            let rect = PdfLayoutGeometry.normalizedPageRect(rawBounds, page: page)
-            guard rect.width > 0, rect.height > 0 else { continue }
+                let rawBounds = subsection.bounds(for: page)
+                let rect = PdfLayoutGeometry.normalizedPageRect(rawBounds, page: page)
+                guard rect.width > 0, rect.height > 0 else { continue }
 
-            fragments.append(PdfLayoutFragment(
-                id: sourceOrder,
-                text: text,
-                rect: rect,
-                source: .native,
-                confidence: 1,
-                sourceOrder: sourceOrder,
-                style: styleHints(from: lineSelection.attributedString)
-            ))
+                fragments.append(PdfLayoutFragment(
+                    id: sourceOrder,
+                    text: text,
+                    rect: rect,
+                    source: .native,
+                    confidence: 1,
+                    sourceOrder: sourceOrder,
+                    style: styleHints(from: subsection.attributedString)
+                ))
+                sourceOrder += 1
+            }
         }
 
         return deduplicated(fragments)
+    }
+
+    /// `PDFSelection.selectionsByLine()` can legally return one selection for
+    /// text that shares a visual baseline across separate columns. Keep the
+    /// normal line-level fast path, but split a suspiciously stretched selection
+    /// when its character geometry contains a strong interior gap.
+    private static func nativeSubselections(
+        for lineSelection: PDFSelection,
+        page: PDFPage
+    ) -> [PDFSelection] {
+        let textRangeCount = lineSelection.numberOfTextRanges(on: page)
+        guard textRangeCount > 0 else { return [lineSelection] }
+
+        var ranges: [NSRange] = []
+        ranges.reserveCapacity(textRangeCount)
+        for index in 0..<textRangeCount {
+            let range = lineSelection.range(at: index, on: page)
+            if range.location != NSNotFound, range.length > 0 {
+                ranges.append(range)
+            }
+        }
+        guard !ranges.isEmpty else { return [lineSelection] }
+
+        // Noncontiguous PDFSelection ranges are already the most faithful cheap
+        // subdivision PDFKit exposes; preserve them as separate fragments.
+        if ranges.count > 1 {
+            let selections = ranges.compactMap { page.selection(for: $0) }
+            if selections.count == ranges.count {
+                return selections
+            }
+        }
+
+        guard ranges.count == 1,
+              shouldInspectCharacterGeometry(lineSelection, page: page) else {
+            return [lineSelection]
+        }
+
+        let splitRanges = rangesSplitAtStrongGlyphGaps(ranges[0], page: page)
+        guard splitRanges.count > 1 else { return [lineSelection] }
+        let selections = splitRanges.compactMap { page.selection(for: $0) }
+        return selections.count == splitRanges.count ? selections : [lineSelection]
+    }
+
+    /// Character geometry is substantially more expensive than line geometry,
+    /// so only inspect lines whose visual span is meaningfully wider than the
+    /// same attributed text laid out without a large interior gap.
+    private static func shouldInspectCharacterGeometry(
+        _ selection: PDFSelection,
+        page: PDFPage
+    ) -> Bool {
+        let bounds = selection.bounds(for: page).standardized
+        let pageBounds = page.bounds(for: .mediaBox).standardized
+        guard bounds.width > 0,
+              pageBounds.width > 0,
+              bounds.width >= pageBounds.width * 0.48,
+              let attributed = selection.attributedString,
+              attributed.length >= 2 else {
+            return false
+        }
+
+        let naturalBounds = attributed.boundingRect(
+            with: CGSize(width: 100_000, height: 10_000),
+            options: [.usesLineFragmentOrigin, .usesFontLeading]
+        ).standardized
+        guard naturalBounds.width > 0 else { return false }
+
+        // The threshold is deliberately conservative. Ordinary justified/wide
+        // prose stays line-level; a merged pair of columns usually includes a
+        // physical gutter far larger than the intrinsic text spacing.
+        return bounds.width >= naturalBounds.width * 1.18
+    }
+
+    private struct NativeGlyph {
+        let characterIndex: Int
+        let rect: CGRect
+    }
+
+    private static func rangesSplitAtStrongGlyphGaps(
+        _ range: NSRange,
+        page: PDFPage
+    ) -> [NSRange] {
+        guard range.location != NSNotFound, range.length > 1 else { return [range] }
+        let upperBound = range.location + range.length
+        guard upperBound <= page.numberOfCharacters else { return [range] }
+
+        var glyphs: [NativeGlyph] = []
+        glyphs.reserveCapacity(range.length)
+
+        for characterIndex in range.location..<upperBound {
+            guard let selection = page.selection(
+                for: NSRange(location: characterIndex, length: 1)
+            ), let text = selection.string,
+               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                continue
+            }
+
+            let rect = PdfLayoutGeometry.normalizedPageRect(
+                selection.bounds(for: page),
+                page: page
+            )
+            guard rect.width > 0, rect.height > 0 else { continue }
+            glyphs.append(NativeGlyph(characterIndex: characterIndex, rect: rect))
+        }
+
+        guard glyphs.count >= 2 else { return [range] }
+        let glyphWidths = glyphs.map(\.rect.width).sorted()
+        let medianGlyphWidth = glyphWidths[glyphWidths.count / 2]
+        let strongGap = max(0.040, medianGlyphWidth * 6.0)
+
+        var result: [NSRange] = []
+        var groupStart = glyphs[0].characterIndex
+        var previous = glyphs[0]
+
+        for glyph in glyphs.dropFirst() {
+            let horizontalGap: CGFloat
+            if previous.rect.maxX < glyph.rect.minX {
+                horizontalGap = glyph.rect.minX - previous.rect.maxX
+            } else if glyph.rect.maxX < previous.rect.minX {
+                horizontalGap = previous.rect.minX - glyph.rect.maxX
+            } else {
+                horizontalGap = 0
+            }
+
+            if horizontalGap >= strongGap {
+                let length = previous.characterIndex - groupStart + 1
+                if length > 0 {
+                    result.append(NSRange(location: groupStart, length: length))
+                }
+                groupStart = glyph.characterIndex
+            }
+            previous = glyph
+        }
+
+        let finalLength = previous.characterIndex - groupStart + 1
+        if finalLength > 0 {
+            result.append(NSRange(location: groupStart, length: finalLength))
+        }
+
+        guard result.count > 1 else { return [range] }
+        return result
     }
 
     static func ocrFragments(from result: PdfOCREngine.OCRResult) -> [PdfLayoutFragment] {
