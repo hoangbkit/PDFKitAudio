@@ -70,13 +70,17 @@ final class PdfLayoutBaselineTests: XCTestCase {
 
             for (pageIndex, pageSpec) in fixture.pages.enumerated() where pageSpec.rendering == .native {
                 let raw = document.page(at: pageIndex)?.string ?? ""
+                let canonicalRaw = TestLayoutBaselineScorer.canonicalMarkerText(raw)
                 for box in pageSpec.boxes {
                     // Duplicate-layer fixtures intentionally use a marker that is
                     // semantic text rather than a unique source-layer identifier.
                     if box.marker == "DUPLICATE_LAYER" { continue }
+                    let probe = measurementProbe(for: box)
                     XCTAssertTrue(
-                        raw.localizedCaseInsensitiveContains(box.marker),
-                        "Missing marker \(box.marker) in \(fixture.name) page \(pageIndex). Raw text: \(raw)"
+                        canonicalRaw.localizedCaseInsensitiveContains(
+                            TestLayoutBaselineScorer.canonicalMarkerText(probe)
+                        ),
+                        "Missing probe \(probe) for marker \(box.marker) in \(fixture.name) page \(pageIndex). Raw text: \(raw)"
                     )
                 }
             }
@@ -117,7 +121,7 @@ final class PdfLayoutBaselineTests: XCTestCase {
             let book = try parser.parse(data: data)
             let text = book.pages.map(\.text).joined(separator: "\n\n")
             let score = TestLayoutBaselineScorer.score(
-                expectedMarkers: fixture.expectedMarkerOrder,
+                expectedMarkers: measurementMarkers(for: fixture),
                 in: text
             )
             overall.add(score)
@@ -159,6 +163,13 @@ final class PdfLayoutBaselineTests: XCTestCase {
         )
         XCTAssertLessThan(missing.coverage, 1)
         XCTAssertLessThan(missing.pairwiseAccuracy, 1)
+
+        let wrapped = TestLayoutBaselineScorer.score(
+            expectedMarkers: ["MARGINAL_NOTE", "AFTER"],
+            in: "MARGINAL_NOT E\nAFTER"
+        )
+        XCTAssertEqual(wrapped.coverage, 1)
+        XCTAssertEqual(wrapped.pairwiseAccuracy, 1)
     }
 
     func testDiagnosticsProduceInspectableJSON() throws {
@@ -174,6 +185,35 @@ final class PdfLayoutBaselineTests: XCTestCase {
         let bookJSON = try TestLayoutDiagnostics.parsedBookJSON(book)
         XCTAssertTrue(bookJSON.contains("pageCount"))
         XCTAssertTrue(bookJSON.contains("L1"))
+    }
+
+    /// Repeated running headers deliberately reuse the same string, so they are
+    /// poor identity markers for pairwise order scoring. Only unique declared
+    /// markers participate in the baseline. If an explicit fixture text omits its
+    /// abstract marker (language fixtures do this), use the text's first token as
+    /// the stable probe while keeping the source content itself unchanged.
+    private func measurementMarkers(for fixture: TestLayoutFixture) -> [String] {
+        let counts = Dictionary(grouping: fixture.expectedMarkerOrder, by: { $0 })
+            .mapValues(\.count)
+        let boxes = fixture.pages.flatMap(\.boxes)
+
+        return fixture.expectedMarkerOrder.compactMap { marker in
+            guard counts[marker] == 1 else { return nil }
+            guard let box = boxes.first(where: { $0.marker == marker }) else {
+                return marker
+            }
+            return measurementProbe(for: box)
+        }
+    }
+
+    private func measurementProbe(for box: TestLayoutTextBox) -> String {
+        let canonicalMarker = TestLayoutBaselineScorer.canonicalMarkerText(box.marker)
+        let canonicalText = TestLayoutBaselineScorer.canonicalMarkerText(box.text)
+        if canonicalText.localizedCaseInsensitiveContains(canonicalMarker) {
+            return box.marker
+        }
+        return box.text.split(whereSeparator: \.isWhitespace).first.map(String.init)
+            ?? box.marker
     }
 
     private func format(_ value: Double) -> String {
