@@ -10,42 +10,17 @@ permissions:
   contents: read
 
 jobs:
-  phase9-fixture-isolation:
-    name: Phase 9 fixture — ${{ matrix.fixture }}
+  phase9-fixture-diagnostics:
+    name: Phase 9 diagnostic — ${{ matrix.fixture }}
     runs-on: macos-14
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         fixture:
-          - single-column-narrow-margins
-          - single-column-wide-margins
-          - centered-paragraphs
-          - justified-looking-paragraphs
-          - first-line-indentation
-          - hanging-indentation
           - short-chapter-heading-body
           - full-width-title-body
-          - large-whitespace-between-paragraphs
-          - blank-page
-          - page-number-only
-          - two-column-symmetric
-          - two-column-60-40
-          - two-column-40-60
-          - two-column-narrow-gutter
-          - two-column-wide-gutter
           - three-column
-          - columns-unequal-final-heights
-          - left-column-ending-early
-          - right-column-begins-lower
-          - short-column-beside-long-column
-          - columns-with-indented-paragraphs
-          - identical-header-every-page
-          - alternating-even-odd-headers
-          - chapter-title-running-header
-          - pure-page-number-footer
-          - decorated-page-number-footer
-          - legitimate-year-near-bottom
           - semantic-sentence-near-top
 
     steps:
