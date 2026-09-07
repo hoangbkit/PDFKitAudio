@@ -104,6 +104,10 @@ final class PdfLayoutPhase9QualityGateTests: XCTestCase {
         // Running-matter fixtures are intentionally excluded: Phase 7 may use
         // accepted geometry fingerprints to improve document cleanup, so final
         // output equality is not a pure page-fast-path measurement there.
+        // Pages whose PDF source order contains an objective large vertical
+        // reversal are also excluded from the fast-path denominator: Phase 9
+        // deliberately repairs those anomalous pages while keeping healthy
+        // simple pages byte-for-byte on the legacy path.
         let simpleCategories: Set<String> = ["simple", "scripts-languages"]
         let fixtures = TestLayoutFixtureCatalog.all.filter {
             $0.pages.allSatisfy { $0.rendering == .native }
@@ -113,17 +117,46 @@ final class PdfLayoutPhase9QualityGateTests: XCTestCase {
 
         let automatic = parser(layout: .auto)
         let legacy = parser(layout: .never)
+        var evaluated = 0
         var equivalent = 0
+        var necessaryRepairs = 0
 
         for fixture in fixtures {
             let data = try TestPDFBuilder.layoutPDF(fixture)
+            let document = try XCTUnwrap(PDFDocument(data: data), fixture.name)
+            var requiresRepair = false
+
+            for pageIndex in 0..<document.pageCount {
+                let page = try XCTUnwrap(document.page(at: pageIndex), fixture.name)
+                let fragments = PdfPositionedTextExtractor.nativeFragments(page: page)
+                let assessment = PdfLayoutComplexityDetector.assess(
+                    fragments: fragments,
+                    nativeText: page.string ?? ""
+                )
+                if PdfLayoutAnalyzer.shouldRepairSimpleOrder(
+                    fragments: fragments,
+                    assessment: assessment
+                ) {
+                    requiresRepair = true
+                    break
+                }
+            }
+
+            if requiresRepair {
+                necessaryRepairs += 1
+                continue
+            }
+
+            evaluated += 1
             let autoBook = try automatic.parse(data: data)
             let neverBook = try legacy.parse(data: data)
             XCTAssertEqual(autoBook.pages, neverBook.pages, "Simple fast-path regression in \(fixture.name)")
             if autoBook.pages == neverBook.pages { equivalent += 1 }
         }
 
-        let precision = Double(equivalent) / Double(max(1, fixtures.count))
+        XCTAssertGreaterThan(evaluated, 10)
+        XCTAssertGreaterThan(necessaryRepairs, 0)
+        let precision = Double(equivalent) / Double(max(1, evaluated))
         XCTAssertGreaterThanOrEqual(precision, 0.99)
     }
 
