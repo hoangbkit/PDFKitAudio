@@ -8,16 +8,20 @@ enum PdfReadingOrderResolver {
     ) -> PdfReadingOrderResult {
         let direction = hints.writingDirection ?? dominantWritingDirection(in: blocks)
         let validBlocks = blocks.filter(isValid)
-        let blockByID = Dictionary(uniqueKeysWithValues: validBlocks.map { ($0.id, $0) })
-
-        guard blockByID.count == validBlocks.count else {
-            return fallback(
-                blocks: validBlocks,
-                direction: direction,
-                geometryConflictCount: 0,
-                diagnostics: ["Duplicate block identifiers make graph construction ambiguous."]
-            )
+        var blockByID: [Int: PdfLayoutBlock] = [:]
+        blockByID.reserveCapacity(validBlocks.count)
+        for block in validBlocks {
+            if blockByID[block.id] != nil {
+                return fallback(
+                    blocks: validBlocks,
+                    direction: direction,
+                    geometryConflictCount: 0,
+                    diagnostics: ["Duplicate block identifier \(block.id) makes graph construction ambiguous."]
+                )
+            }
+            blockByID[block.id] = block
         }
+
         guard !validBlocks.isEmpty else {
             return PdfReadingOrderResult(
                 orderedBlockIDs: [],
@@ -236,6 +240,11 @@ enum PdfReadingOrderResolver {
                 }
                 return $0.rect.minX < $1.rect.minX
             }
+            let deferredTrailing = deferredTrailingPrimaryBlockIDs(
+                region: region,
+                columns: orderedColumns,
+                blockByID: blockByID
+            )
             var columnSequences: [[Int]] = []
             var columnAssigned: Set<Int> = []
 
@@ -243,6 +252,7 @@ enum PdfReadingOrderResolver {
                 let columnIDs = Set(column.blockIDs)
                     .intersection(regionIDs)
                     .subtracting(columnAssigned)
+                    .subtracting(deferredTrailing)
                 let sequence = stableSorted(
                     columnIDs.compactMap { blockByID[$0] },
                     direction: direction
@@ -273,6 +283,7 @@ enum PdfReadingOrderResolver {
             let leftoverPrimary = Set(region.primaryBlockIDs)
                 .intersection(regionIDs)
                 .subtracting(primarySequence)
+                .subtracting(deferredTrailing)
             if !leftoverPrimary.isEmpty {
                 let leftover = stableSorted(
                     leftoverPrimary.compactMap { blockByID[$0] },
@@ -288,6 +299,28 @@ enum PdfReadingOrderResolver {
                 }
                 appendChain(leftover, confidence: 0.62, reason: .sameColumn, edges: &edges)
                 primarySequence += leftover
+            }
+
+            if !deferredTrailing.isEmpty {
+                let trailing = stableSorted(
+                    deferredTrailing.compactMap { blockByID[$0] },
+                    direction: direction
+                ).map(\.id)
+                if let from = primarySequence.last, let to = trailing.first {
+                    edges.append(edge(
+                        from: from,
+                        to: to,
+                        confidence: max(0.68, region.confidence * 0.88),
+                        reason: .regionSequence
+                    ))
+                }
+                appendChain(
+                    trailing,
+                    confidence: max(0.68, region.confidence * 0.88),
+                    reason: .regionSequence,
+                    edges: &edges
+                )
+                primarySequence += trailing
             }
 
         case .spanning:
@@ -355,6 +388,63 @@ enum PdfReadingOrderResolver {
             edges: &edges
         )
         return fallbackSequence
+    }
+
+    /// Phase 4 can conservatively keep a short, left-aligned summary/footer in
+    /// the nearest primary lane because PDFKit exposes glyph bounds rather than
+    /// the invisible full-width drawing box. When such a block is observably
+    /// wider than its lane peers and starts clearly below every primary-column
+    /// body block, treat it as a trailing cross-column continuation for spoken
+    /// order. This does not depend on hidden drawing-box geometry.
+    private static func deferredTrailingPrimaryBlockIDs(
+        region: PdfLayoutRegion,
+        columns: [PdfLayoutColumn],
+        blockByID: [Int: PdfLayoutBlock]
+    ) -> Set<Int> {
+        guard columns.count >= 2 else { return [] }
+        let regionPrimary = Set(region.primaryBlockIDs)
+        var result: Set<Int> = []
+
+        for column in columns {
+            let members = column.blockIDs
+                .filter { regionPrimary.contains($0) }
+                .compactMap { blockByID[$0] }
+            guard members.count >= 2 else { continue }
+
+            for candidate in members {
+                let ownPeers = members.filter { $0.id != candidate.id }
+                guard !ownPeers.isEmpty else { continue }
+
+                let otherColumnBlocks = columns
+                    .filter { $0.id != column.id }
+                    .flatMap { $0.blockIDs }
+                    .filter { regionPrimary.contains($0) }
+                    .compactMap { blockByID[$0] }
+                guard !otherColumnBlocks.isEmpty else { continue }
+
+                let allBodyPeers = ownPeers + otherColumnBlocks
+                let bodyBottom = allBodyPeers.map(\.rect.maxY).max() ?? 0
+                guard candidate.rect.minY >= bodyBottom + 0.035 else { continue }
+
+                let ownMedianWidth = median(ownPeers.map { $0.rect.width })
+                let pageBodyMedianWidth = median(allBodyPeers.map { $0.rect.width })
+                let referenceWidth = max(0.000_001, min(ownMedianWidth, pageBodyMedianWidth))
+                guard candidate.rect.width >= referenceWidth * 1.12 else { continue }
+
+                // A trailing continuation should remain close to the horizontal
+                // span occupied by primary text rather than being a remote note.
+                let primaryRect = allBodyPeers.dropFirst().reduce(allBodyPeers.first?.rect ?? .zero) {
+                    $0.union($1.rect)
+                }
+                let horizontallyCompatible = candidate.rect.midX >= primaryRect.minX - 0.06
+                    && candidate.rect.midX <= primaryRect.maxX + 0.06
+                guard horizontallyCompatible else { continue }
+
+                result.insert(candidate.id)
+            }
+        }
+
+        return result
     }
 
     private static func appendFootnoteEdges(
@@ -651,6 +741,16 @@ enum PdfReadingOrderResolver {
             && block.rect.height.isFinite
             && block.rect.width > 0
             && block.rect.height > 0
+    }
+
+    private static func median(_ values: [CGFloat]) -> CGFloat {
+        guard !values.isEmpty else { return 0 }
+        let sorted = values.sorted()
+        let middle = sorted.count / 2
+        if sorted.count.isMultiple(of: 2) {
+            return (sorted[middle - 1] + sorted[middle]) / 2
+        }
+        return sorted[middle]
     }
 
     private static func formatted(_ value: Double) -> String {
