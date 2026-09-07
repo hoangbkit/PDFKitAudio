@@ -16,6 +16,7 @@ enum PdfLayoutAnalyzer {
     private static let minimumReadingOrderConfidence = 0.62
     private static let minimumInformationRatio = 0.72
     private static let maximumInformationRatio = 2.20
+    private static let minimumSimpleRepairConfidence = 0.82
 
     static func analyze(
         fragments: [PdfLayoutFragment],
@@ -49,7 +50,14 @@ enum PdfLayoutAnalyzer {
         case .never:
             return nil
         case .auto:
-            guard assessment.shouldAnalyze else { return nil }
+            // Keep ordinary single-column pages on the exact legacy fast path.
+            // A very small exception repairs an objectively broken PDF source
+            // order when a high-confidence simple page contains a large vertical
+            // backtrack (for example body text serialized before a title/header).
+            guard assessment.shouldAnalyze
+                    || shouldRepairSimpleOrder(fragments: positioned, assessment: assessment) else {
+                return nil
+            }
         case .always:
             break
         }
@@ -67,7 +75,8 @@ enum PdfLayoutAnalyzer {
 
         try checkpoint()
         let layout = PdfLayoutRegionDetector.segment(blocks: blocks)
-        let special = PdfLayoutRoleClassifier.analyze(blocks: blocks, layout: layout)
+        let rawSpecial = PdfLayoutRoleClassifier.analyze(blocks: blocks, layout: layout)
+        let special = reconciledSpecialStructures(rawSpecial, assessment: assessment)
         guard Set(special.assignments.map(\.blockID)) == Set(blocks.map(\.id)),
               special.assignments.count == blocks.count else {
             return nil
@@ -111,6 +120,92 @@ enum PdfLayoutAnalyzer {
             fingerprints: fingerprints,
             assessment: assessment,
             readingOrder: readingOrder
+        )
+    }
+
+    /// True only for a high-confidence single-column page whose source order has
+    /// an unambiguous vertical reversal. This is intentionally narrower than the
+    /// normal complexity gate so healthy book pages stay byte-for-byte legacy.
+    static func shouldRepairSimpleOrder(
+        fragments: [PdfLayoutFragment],
+        assessment: PdfLayoutComplexityAssessment
+    ) -> Bool {
+        guard assessment.complexity == .simpleSingleColumn,
+              assessment.confidence >= minimumSimpleRepairConfidence else {
+            return false
+        }
+
+        let ordered = fragments
+            .filter {
+                !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    && $0.rect.width > 0
+                    && $0.rect.height > 0
+                    && $0.rect.minX.isFinite
+                    && $0.rect.minY.isFinite
+                    && $0.rect.width.isFinite
+                    && $0.rect.height.isFinite
+            }
+            .sorted {
+                if $0.sourceOrder != $1.sourceOrder { return $0.sourceOrder < $1.sourceOrder }
+                return $0.id < $1.id
+            }
+        guard ordered.count >= 2 else { return false }
+
+        let medianHeight = median(ordered.map { $0.rect.height })
+        let minimumBacktrack = max(0.035, min(0.10, medianHeight * 1.8))
+
+        for index in 0..<(ordered.count - 1) {
+            let first = ordered[index]
+            let second = ordered[index + 1]
+            let backtrack = first.rect.minY - second.rect.minY
+            guard backtrack >= minimumBacktrack else { continue }
+
+            let overlap = max(0, min(first.rect.maxX, second.rect.maxX) - max(first.rect.minX, second.rect.minX))
+            let narrowerWidth = min(first.rect.width, second.rect.width)
+            let overlapRatio = narrowerWidth > 0 ? overlap / narrowerWidth : 0
+            let centersAreClose = abs(first.rect.midX - second.rect.midX) <= 0.20
+
+            if overlapRatio >= 0.30 || centersAreClose {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    /// Phase 6 has a conservative compact-grid table fallback for cases where the
+    /// Phase 2 detector is uncertain. It must never override a positive Phase 2
+    /// multi-column classification: doing so turns three-column prose into a
+    /// row-major table. Reconcile that one contradictory interpretation here.
+    private static func reconciledSpecialStructures(
+        _ analysis: PdfSpecialStructureAnalysis,
+        assessment: PdfLayoutComplexityAssessment
+    ) -> PdfSpecialStructureAnalysis {
+        guard assessment.complexity == .likelyMultiColumn,
+              !analysis.tables.isEmpty else {
+            return analysis
+        }
+
+        let tableBlockIDs = analysis.tables.reduce(into: Set<Int>()) {
+            $0.formUnion($1.blockIDs)
+        }
+        let assignments = analysis.assignments.map { assignment in
+            guard assignment.role == .tableCell,
+                  tableBlockIDs.contains(assignment.blockID) else {
+                return assignment
+            }
+            return PdfLayoutRoleAssignment(
+                blockID: assignment.blockID,
+                role: .body,
+                confidence: 0.72,
+                signals: ["Phase 2 multi-column classification outranks table-grid fallback"]
+            )
+        }
+
+        return PdfSpecialStructureAnalysis(
+            assignments: assignments,
+            tables: [],
+            readingOrderHints: analysis.readingOrderHints
         )
     }
 
@@ -225,5 +320,15 @@ enum PdfLayoutAnalyzer {
                 count += 1
             }
         }
+    }
+
+    private static func median(_ values: [CGFloat]) -> CGFloat {
+        guard !values.isEmpty else { return 0 }
+        let sorted = values.sorted()
+        let middle = sorted.count / 2
+        if sorted.count.isMultiple(of: 2) {
+            return (sorted[middle - 1] + sorted[middle]) / 2
+        }
+        return sorted[middle]
     }
 }
