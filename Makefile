@@ -39,6 +39,9 @@ example-build-ci: example-generate
 		-derivedDataPath $(DERIVED_DATA) \
 		CODE_SIGNING_ALLOWED=NO \
 		build
+	@test -f "$(APP)/Contents/Resources/digital-text.pdf"
+	@test -f "$(APP)/Contents/Resources/outline-chapters.pdf"
+	@test -f "$(APP)/Contents/Resources/blank-page.pdf"
 
 example-open: example-generate
 	open "$(XCODEPROJ)"
