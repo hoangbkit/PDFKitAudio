@@ -78,6 +78,7 @@ enum PdfLayoutRegionDetector {
             ).map { [$0] } ?? []
         }
 
+        let nonSpanning = blocks.filter { !spanningIDs.contains($0.id) }
         var regions: [PdfLayoutRegion] = []
         var cursor: CGFloat = 0
 
@@ -86,7 +87,7 @@ enum PdfLayoutRegionDetector {
             if bandEnd - cursor > 0.000_5,
                let region = regionForBand(
                     id: regions.count,
-                    blocks: blocks.filter { !spanningIDs.contains($0.id) },
+                    blocks: nonSpanning,
                     sidebarIDs: sidebarIDs,
                     verticalRange: cursor...bandEnd
                ) {
@@ -113,7 +114,7 @@ enum PdfLayoutRegionDetector {
         if cursor < 1,
            let region = regionForBand(
                 id: regions.count,
-                blocks: blocks.filter { !spanningIDs.contains($0.id) },
+                blocks: nonSpanning,
                 sidebarIDs: sidebarIDs,
                 verticalRange: cursor...1
            ) {
@@ -336,7 +337,6 @@ enum PdfLayoutRegionDetector {
     ) -> Set<Int> {
         guard primaryColumns.count >= 2 else { return [] }
         let orderedColumns = primaryColumns.sorted { $0.rect.minX < $1.rect.minX }
-        let columnIDs = Set(primaryColumns.flatMap(\.blockIDs))
         let medianColumnWidth = median(primaryColumns.map { $0.rect.width })
         var gutterCenters: [CGFloat] = []
 
@@ -351,24 +351,15 @@ enum PdfLayoutRegionDetector {
         guard !gutterCenters.isEmpty else { return [] }
         var result: Set<Int> = []
 
-        for block in blocks where !columnIDs.contains(block.id) {
+        // Glyph-bound PDFKit rectangles are often much narrower than the text
+        // box in which the line was drawn. Crossing an established primary
+        // gutter is therefore the strongest signal; width only needs to be
+        // clearly larger than a normal column line, not an absolute full page.
+        for block in blocks {
             let crossesGutter = gutterCenters.contains { center in
                 block.rect.minX <= center - 0.006 && block.rect.maxX >= center + 0.006
             }
-            let wideEnough = block.rect.width >= max(0.56, medianColumnWidth * 1.30)
-            if crossesGutter && wideEnough {
-                result.insert(block.id)
-            }
-        }
-
-        // A global lane seed may accidentally include a later/earlier wide block
-        // only when its left edge resembles one column. Recheck every block so
-        // spanning content is not hidden merely by seed membership.
-        for block in blocks where !result.contains(block.id) {
-            let crossesGutter = gutterCenters.contains { center in
-                block.rect.minX <= center - 0.006 && block.rect.maxX >= center + 0.006
-            }
-            let wideEnough = block.rect.width >= max(0.62, medianColumnWidth * 1.45)
+            let wideEnough = block.rect.width >= max(0.38, medianColumnWidth * 1.24)
             if crossesGutter && wideEnough {
                 result.insert(block.id)
             }
@@ -385,19 +376,31 @@ enum PdfLayoutRegionDetector {
 
         for candidate in blocks {
             for body in blocks where body.id != candidate.id {
-                guard candidate.rect.width <= body.rect.width * 0.62,
-                      candidate.rect.height <= body.rect.height * 0.72 else {
-                    continue
-                }
+                let widthRatio = candidate.rect.width / max(0.000_001, body.rect.width)
+                guard widthRatio <= 0.82 else { continue }
 
                 let overlap = verticalOverlap(candidate.rect, body.rect)
                 let verticalContainment = overlap / max(0.000_001, candidate.rect.height)
-                guard verticalContainment >= 0.48 else { continue }
+                guard verticalContainment >= 0.35 else { continue }
 
                 let horizontalOverlap = horizontalOverlapRatio(candidate.rect, body.rect)
                 let outsideBodyLane = candidate.rect.midX < body.rect.minX
                     || candidate.rect.midX > body.rect.maxX
-                if horizontalOverlap <= 0.28 || outsideBodyLane {
+                guard horizontalOverlap <= 0.28 || outsideBodyLane else { continue }
+
+                let candidateFont = medianFontSize(of: candidate)
+                let bodyFont = medianFontSize(of: body)
+                let smallerStyle: Bool
+                if let candidateFont, let bodyFont, bodyFont > 0 {
+                    smallerStyle = candidateFont <= bodyFont * 0.92
+                } else {
+                    smallerStyle = false
+                }
+
+                // Style hints make moderately narrow side content strong
+                // evidence. Without style (common for OCR), require a much
+                // narrower geometry so a short real column is not mislabeled.
+                if smallerStyle || widthRatio <= 0.62 {
                     result.insert(candidate.id)
                     break
                 }
@@ -405,6 +408,12 @@ enum PdfLayoutRegionDetector {
         }
 
         return result
+    }
+
+    private static func medianFontSize(of block: PdfLayoutBlock) -> CGFloat? {
+        let values = block.lines.compactMap(\.medianFontSize)
+        guard !values.isEmpty else { return nil }
+        return median(values)
     }
 
     private static func isValid(_ block: PdfLayoutBlock) -> Bool {
