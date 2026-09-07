@@ -8,8 +8,7 @@
 - [x] Phase 5 - TTS segmentation and exact source mapping
 - [x] Phase 6 - concurrency, cancellation, and progressive parsing
 - [x] Phase 7 - macOS API hardening and package polish
-- [ ] Phase 8 - Spokio integration validation
 
-PDFKitAudio intentionally remains macOS-only (macOS 14+). The optional iOS support path described in the original `PLAN.md` was superseded by this product decision.
+PDFKitAudio is treated as a standalone macOS package. The consuming-app integration phase from the original plan is intentionally not pursued here.
 
-The implementation-grade design details remain in `PLAN.md`. This small file records completion without rewriting or shortening that plan.
+The implementation-grade design details remain in `PLAN.md`. This small file records completion without rewriting or shortening that historical plan.

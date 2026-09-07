@@ -1,0 +1,67 @@
+name: PDFKitAudioDemo
+
+options:
+  minimumXcodeGenVersion: 2.45.4
+  createIntermediateGroups: true
+  defaultConfig: Debug
+  developmentLanguage: en
+  deploymentTarget:
+    macOS: "14.0"
+
+configs:
+  Debug: debug
+  Release: release
+
+packages:
+  PDFKitAudio:
+    path: ../..
+
+settings:
+  base:
+    ARCHS: "$(ARCHS_STANDARD)"
+    CODE_SIGN_STYLE: Automatic
+    COMBINE_HIDPI_IMAGES: YES
+    CURRENT_PROJECT_VERSION: 1
+    DEVELOPMENT_TEAM: J458WW3452
+    ENABLE_APP_SANDBOX: YES
+    ENABLE_HARDENED_RUNTIME: YES
+    ENABLE_PREVIEWS: YES
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    GENERATE_INFOPLIST_FILE: YES
+    INFOPLIST_KEY_CFBundleDisplayName: PDFKitAudio Demo
+    INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
+    INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    MARKETING_VERSION: "1.0"
+    PRODUCT_BUNDLE_IDENTIFIER: com.hoangbkit.pdfkit.demo
+    PRODUCT_NAME: PDFKitAudioDemo
+    SDKROOT: macosx
+    SWIFT_STRICT_CONCURRENCY: complete
+    SWIFT_VERSION: 5.0
+
+fileGroups:
+  - project.yml
+
+targets:
+  PDFKitAudioDemo:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: Sources
+    dependencies:
+      - package: PDFKitAudio
+        product: PDFKitAudio
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: Sources/PDFKitAudioDemo.entitlements
+
+schemes:
+  PDFKitAudioDemo:
+    build:
+      targets:
+        PDFKitAudioDemo: all
+    run:
+      config: Debug
+    archive:
+      config: Release
