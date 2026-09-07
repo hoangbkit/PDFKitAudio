@@ -108,6 +108,6 @@ This PR started as a planning-only change and is now implementing the approved p
 - The entire single-page fixture matrix is checked for deterministic role output and exact block conservation: every input block receives exactly one assignment and no role classifier removes text.
 - Real generated PDFKit integration tests validate table structure/linearization, caption role plus anchor hint, and strong footnote classification through the full native extraction → line/block reconstruction → region → role-analysis pipeline.
 - Phase 6 remains internal and does not alter `PdfParser` selected text or public API; parser/analyzer integration remains deferred to Phase 8.
-- The Phase 6 gate passed all SwiftPM tests and the generated macOS example-app build on macOS 14.
+- The Phase 6 gate passed all SwiftPM tests and the generated macOS example-app build on macOS 14, including the real PDFKit integration suite.
 
 Each phase is marked complete only after its exit criteria are satisfied and CI is green.
