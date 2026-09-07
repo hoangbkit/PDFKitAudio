@@ -123,8 +123,9 @@ final class PdfLayoutBenchmarkTests: XCTestCase {
         ocrPageCount: Int,
         outputCharacters: Int
     ) {
+        let secondsText = String(format: "%.4f", seconds)
         print(
-            "LAYOUT_BENCHMARK name=\(name) pages=\(pageCount) seconds=\(String(format: \"%.4f\", seconds)) peakResidentBytes=\(peakResidentBytes) ocrPages=\(ocrPageCount) outputCharacters=\(outputCharacters)"
+            "LAYOUT_BENCHMARK name=\(name) pages=\(pageCount) seconds=\(secondsText) peakResidentBytes=\(peakResidentBytes) ocrPages=\(ocrPageCount) outputCharacters=\(outputCharacters)"
         )
     }
 }
