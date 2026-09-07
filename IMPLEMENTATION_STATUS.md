@@ -10,7 +10,7 @@ This PR started as a planning-only change and is now implementing the approved p
 - [x] Phase 5 — reading-order DAG and deterministic resolver
 - [x] Phase 6 — lightweight role classification and special structures
 - [x] Phase 7 — geometry-aware document cleanup
-- [ ] Phase 8 — parser integration, selection policy, and public configuration
+- [x] Phase 8 — parser integration, selection policy, and public configuration
 - [ ] Phase 9 — comprehensive real-world and adversarial testing
 - [ ] Phase 10 — hardening, diagnostics, documentation, and rollout
 
@@ -123,6 +123,21 @@ This PR started as a planning-only change and is now implementing the approved p
 - Mixed analyzed/fast-path pages share the same document cleanup/removal set; style information is supporting metadata only and can never independently trigger deletion.
 - Regression coverage includes headers outside legacy windows, inconsistent geometry, moving page numbers, legitimate years, semantic chapter headings, sparse recurrence, short documents, mixed-mode pages, alternating headers, determinism, and real PDFKit identical/alternating running headers.
 - Existing parser behavior remains source-compatible because `layoutFingerprints` defaults to empty; production parser wiring is Phase 8.
-- The Phase 7 code/test gate passed the full SwiftPM suite and generated macOS example-app build on macOS 14. Phase 8 remains untouched until the final branch head is green.
+- The Phase 7 code/test gate passed the full SwiftPM suite and generated macOS example-app build on macOS 14.
+
+### Phase 8
+
+- Added the small public `PdfLayoutMode` / `PdfLayoutConfiguration` surface with `.auto`, `.never`, and `.always`; `.auto` is the default and heuristic thresholds remain internal.
+- Added `layout` to `PdfParserConfiguration` with a default value, preserving existing labeled initializer call sites and the legacy `PdfParser` initializers; `PdfParser.layoutConfiguration` mirrors the existing OCR/cleanup compatibility aliases.
+- Added page-local `PdfLayoutAnalyzer` orchestration that deduplicates positioned fragments, applies the Phase 2 complexity gate, reconstructs lines/blocks/regions, derives Phase 6 roles/hints, resolves the Phase 5 DAG, materializes table-aware spoken text, and returns only compact Phase 7 fingerprints.
+- `.never` skips positioned geometry entirely and preserves the legacy selected-text path.
+- `.auto` analyzes only pages that cross the conservative complexity gate; simple pages keep the existing selected text byte-for-byte through page-local cleanup.
+- `.always` attempts every page with usable positioned text, but it does not bypass safety: low-confidence or structurally invalid reconstruction falls back to the current selected text.
+- Analyzer acceptance requires unique fragment/block identities, exact fragment conservation through line/block reconstruction, one role assignment per block, complete non-fallback reading order, minimum reading-order confidence, non-empty output for meaningful source text, and bounded informative-character ratios.
+- OCR/native selection still happens before layout transformation. Native-selected pages use PDFKit geometry; OCR-selected pages use retained Vision observations. `PdfPageContent.extractionSource` remains native/OCR/empty and layout never becomes a new provenance source.
+- Accepted analyzed pages contribute compact fingerprints to the single document-cleanup pass; rejected/simple pages continue through the text-only fallback, allowing mixed analyzed/fast-path documents without double cleanup.
+- Layout work remains inside the existing public `.extracting` progress stage. Cancellation checkpoints surround positioned extraction and occur before, during, and after page-local analysis without adding a source-breaking `PdfParseStage` case.
+- Phase 8 regression coverage verifies `.never` legacy equivalence on a complex page, `.auto` byte equivalence on a simple page, exact two-column spoken order, `.always` analyzer entry, unsafe-identity fallback, mixed native/scanned complex ordering and provenance, internal analyzer cancellation checkpoints, monotonic progress, and async cancellation between large complex page units.
+- The Phase 8 gate passed the full SwiftPM suite and generated macOS example-app build on macOS 14.
 
 Each phase is marked complete only after its exit criteria are satisfied and CI is green.
