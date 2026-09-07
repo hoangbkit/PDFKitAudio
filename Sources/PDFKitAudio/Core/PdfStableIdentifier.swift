@@ -11,7 +11,7 @@ enum PdfStableIdentifier {
                 hash ^= UInt64(byte)
                 hash &*= 1_099_511_628_211
             }
-            hash ^= UInt64(Character(":").asciiValue ?? 58)
+            hash ^= 58
             hash &*= 1_099_511_628_211
 
             for byte in component.utf8 {
