@@ -20,6 +20,15 @@ struct TestMarkerOrderScore: Equatable {
 }
 
 enum TestLayoutBaselineScorer {
+    /// PDFKit is allowed to insert whitespace inside a visually narrow marker
+    /// (for example `MARGINAL_NOT E`). Reading-order markers are semantic test
+    /// anchors, not formatting assertions, so score against a whitespace-free,
+    /// canonically composed view of both the output and marker strings.
+    static func canonicalMarkerText(_ text: String) -> String {
+        text.precomposedStringWithCanonicalMapping
+            .filter { !$0.isWhitespace }
+    }
+
     static func score(expectedMarkers: [String], in text: String) -> TestMarkerOrderScore {
         guard !expectedMarkers.isEmpty else {
             return TestMarkerOrderScore(
@@ -31,13 +40,18 @@ enum TestLayoutBaselineScorer {
             )
         }
 
+        let canonicalText = canonicalMarkerText(text)
+        let canonicalMarkers = expectedMarkers.map(canonicalMarkerText)
         var firstOffsets: [String: Int] = [:]
         var duplicates = 0
 
-        for marker in expectedMarkers {
-            let ranges = allRanges(of: marker, in: text)
+        for marker in canonicalMarkers {
+            let ranges = allRanges(of: marker, in: canonicalText)
             if let first = ranges.first {
-                firstOffsets[marker] = text.distance(from: text.startIndex, to: first.lowerBound)
+                firstOffsets[marker] = canonicalText.distance(
+                    from: canonicalText.startIndex,
+                    to: first.lowerBound
+                )
             }
             if ranges.count > 1 {
                 duplicates += 1
@@ -46,12 +60,12 @@ enum TestLayoutBaselineScorer {
 
         var correctPairs = 0
         var totalPairs = 0
-        if expectedMarkers.count > 1 {
-            for leftIndex in 0..<(expectedMarkers.count - 1) {
-                for rightIndex in (leftIndex + 1)..<expectedMarkers.count {
+        if canonicalMarkers.count > 1 {
+            for leftIndex in 0..<(canonicalMarkers.count - 1) {
+                for rightIndex in (leftIndex + 1)..<canonicalMarkers.count {
                     totalPairs += 1
-                    let left = expectedMarkers[leftIndex]
-                    let right = expectedMarkers[rightIndex]
+                    let left = canonicalMarkers[leftIndex]
+                    let right = canonicalMarkers[rightIndex]
                     if let leftOffset = firstOffsets[left],
                        let rightOffset = firstOffsets[right],
                        leftOffset < rightOffset {
@@ -62,8 +76,8 @@ enum TestLayoutBaselineScorer {
         }
 
         return TestMarkerOrderScore(
-            expectedMarkerCount: expectedMarkers.count,
-            foundMarkerCount: firstOffsets.count,
+            expectedMarkerCount: canonicalMarkers.count,
+            foundMarkerCount: canonicalMarkers.filter { firstOffsets[$0] != nil }.count,
             totalPairs: totalPairs,
             correctPairs: correctPairs,
             duplicateMarkerCount: duplicates
@@ -71,9 +85,14 @@ enum TestLayoutBaselineScorer {
     }
 
     static func orderedMarkers(expectedMarkers: [String], in text: String) -> [String] {
-        expectedMarkers.compactMap { marker -> (String, Int)? in
-            guard let range = text.range(of: marker) else { return nil }
-            return (marker, text.distance(from: text.startIndex, to: range.lowerBound))
+        let canonicalText = canonicalMarkerText(text)
+        return expectedMarkers.compactMap { marker -> (String, Int)? in
+            let canonicalMarker = canonicalMarkerText(marker)
+            guard let range = canonicalText.range(of: canonicalMarker) else { return nil }
+            return (
+                marker,
+                canonicalText.distance(from: canonicalText.startIndex, to: range.lowerBound)
+            )
         }
         .sorted {
             if $0.1 != $1.1 { return $0.1 < $1.1 }
