@@ -53,6 +53,14 @@ enum PdfLayoutRegionDetector {
             PdfLayoutRegionDetector.median(blocks.map { $0.rect.width })
         }
 
+        var medianFontSize: CGFloat? {
+            let values = blocks.flatMap { block in
+                block.lines.compactMap(\.medianFontSize)
+            }
+            guard !values.isEmpty else { return nil }
+            return PdfLayoutRegionDetector.median(values)
+        }
+
         mutating func append(_ block: PdfLayoutBlock) {
             let count = CGFloat(blocks.count)
             centerX = ((centerX * count) + block.rect.minX) / (count + 1)
@@ -371,49 +379,57 @@ enum PdfLayoutRegionDetector {
     private static func detectSidebarBlockIDs(
         in blocks: [PdfLayoutBlock]
     ) -> Set<Int> {
-        guard blocks.count >= 2 else { return [] }
+        let eligible = blocks.filter { $0.rect.width <= 0.55 }
+        let lanes = clusterLanes(eligible)
+        guard lanes.count >= 2 else { return [] }
         var result: Set<Int> = []
 
-        for candidate in blocks {
-            for body in blocks where body.id != candidate.id {
-                let widthRatio = candidate.rect.width / max(0.000_001, body.rect.width)
-                guard widthRatio <= 0.82 else { continue }
+        for candidateIndex in lanes.indices {
+            let candidate = lanes[candidateIndex]
 
-                let overlap = verticalOverlap(candidate.rect, body.rect)
-                let verticalContainment = overlap / max(0.000_001, candidate.rect.height)
-                guard verticalContainment >= 0.35 else { continue }
+            for bodyIndex in lanes.indices where bodyIndex != candidateIndex {
+                let body = lanes[bodyIndex]
+                guard body.blocks.count >= 2,
+                      candidate.blocks.count < body.blocks.count else {
+                    continue
+                }
 
-                let horizontalOverlap = horizontalOverlapRatio(candidate.rect, body.rect)
-                let outsideBodyLane = candidate.rect.midX < body.rect.minX
-                    || candidate.rect.midX > body.rect.maxX
-                guard horizontalOverlap <= 0.28 || outsideBodyLane else { continue }
+                let horizontalGap: CGFloat
+                if candidate.rect.maxX < body.rect.minX {
+                    horizontalGap = body.rect.minX - candidate.rect.maxX
+                } else if body.rect.maxX < candidate.rect.minX {
+                    horizontalGap = candidate.rect.minX - body.rect.maxX
+                } else {
+                    horizontalGap = 0
+                }
+                guard horizontalGap >= 0.018 else { continue }
 
-                let candidateFont = medianFontSize(of: candidate)
-                let bodyFont = medianFontSize(of: body)
+                let withinBodySpan = candidate.rect.midY >= body.rect.minY - 0.035
+                    && candidate.rect.midY <= body.rect.maxY + 0.035
+                guard withinBodySpan else { continue }
+
+                let widthRatio = candidate.medianWidth / max(0.000_001, body.medianWidth)
                 let smallerStyle: Bool
-                if let candidateFont, let bodyFont, bodyFont > 0 {
+                if let candidateFont = candidate.medianFontSize,
+                   let bodyFont = body.medianFontSize,
+                   bodyFont > 0 {
                     smallerStyle = candidateFont <= bodyFont * 0.92
                 } else {
                     smallerStyle = false
                 }
 
-                // Style hints make moderately narrow side content strong
-                // evidence. Without style (common for OCR), require a much
-                // narrower geometry so a short real column is not mislabeled.
-                if smallerStyle || widthRatio <= 0.62 {
-                    result.insert(candidate.id)
+                let sparseGeometry = candidate.blocks.count * 2 <= body.blocks.count
+                let strongStyledSidebar = smallerStyle && widthRatio <= 0.85
+                let strongGeometrySidebar = sparseGeometry && widthRatio <= 0.62
+
+                if strongStyledSidebar || strongGeometrySidebar {
+                    result.formUnion(candidate.blocks.map(\.id))
                     break
                 }
             }
         }
 
         return result
-    }
-
-    private static func medianFontSize(of block: PdfLayoutBlock) -> CGFloat? {
-        let values = block.lines.compactMap(\.medianFontSize)
-        guard !values.isEmpty else { return nil }
-        return median(values)
     }
 
     private static func isValid(_ block: PdfLayoutBlock) -> Bool {
@@ -438,11 +454,6 @@ enum PdfLayoutRegionDetector {
 
     private static func verticalOverlap(_ lhs: CGRect, _ rhs: CGRect) -> CGFloat {
         max(0, min(lhs.maxY, rhs.maxY) - max(lhs.minY, rhs.minY))
-    }
-
-    private static func horizontalOverlapRatio(_ lhs: CGRect, _ rhs: CGRect) -> CGFloat {
-        let overlap = max(0, min(lhs.maxX, rhs.maxX) - max(lhs.minX, rhs.minX))
-        return overlap / max(0.000_001, min(lhs.width, rhs.width))
     }
 
     private static func unionRect(_ rects: [CGRect]) -> CGRect {
