@@ -2,7 +2,7 @@
 
 Lightweight PDF extraction and audiobook-oriented text preparation for macOS 14+.
 
-PDFKitAudio is intentionally **macOS-only**. It is designed for desktop document-to-audio workflows where imports, OCR, and downstream synthesis may run for a long time. The package does not declare iOS/iPadOS support.
+PDFKitAudio is a standalone, **macOS-only** Swift package. It is designed for desktop document-to-audio workflows where imports, OCR, and downstream synthesis may run for a long time. The package does not declare iOS/iPadOS support.
 
 The parser uses PDFKit native text first and selectively falls back to Vision OCR. It intentionally avoids heavyweight document-understanding models.
 
@@ -83,7 +83,7 @@ PDF outline entries are retained as navigation metadata independently from audio
 
 ## Audiobook segmentation
 
-PDFKitAudio provides an engine-agnostic convenience segmenter for callers that want bounded text with page provenance. `TTSChunkingConfiguration` controls only generic document behavior such as character limits and paragraph preservation; TTS-engine token limits, prosody, pause durations, retries, and generation policy belong in the consuming TTS layer.
+PDFKitAudio provides an engine-agnostic convenience segmenter for callers that want bounded text with page provenance. `TTSChunkingConfiguration` controls generic document behavior such as character limits and paragraph preservation; model token limits, prosody, pause durations, retries, and synthesis policy belong in the consuming TTS layer.
 
 ```swift
 let segments = book.audiobookScript(configuration: TTSChunkingConfiguration(
@@ -98,8 +98,6 @@ The configuration-based API may pack adjacent short pieces across page boundarie
 The legacy `audiobookScript(maxCharsPerSegment:)` API remains page-bounded so existing callers do not silently receive wider provenance ranges.
 
 Chunking prefers paragraph and Foundation sentence boundaries, then clause/word boundaries. A hard split is reserved for an unbroken token that exceeds the maximum, and Swift grapheme-cluster indexing keeps Unicode characters intact.
-
-Spokio already owns richer engine-facing chunking in `TextToSpeech` (`ProsodyTextChunker`), so PDFKitAudio deliberately does not duplicate prosody or silence-boundary semantics.
 
 ## Async parsing, progress, and cancellation
 
@@ -133,7 +131,37 @@ Async parsing preserves Swift task cancellation as `CancellationError`. Cancella
 
 PDFKit access is intentionally serial rather than page-parallel. Each page is processed inside an autorelease pool, OCR thumbnails are page-scoped, and no rendered page images are retained by `PdfBook`. Cover rendering is deferred until text/chapter work is complete, remains bounded to a small thumbnail, and can be disabled for bulk imports.
 
-PDFKitAudio deliberately does not add an `AsyncSequence` page-streaming API yet. Spokio's job model already uses `async throws` work plus progress reporting, so stage/page progress is the smaller integration surface unless a real workflow later demonstrates a need for streaming partial page objects.
+The package deliberately does not add an `AsyncSequence` page-streaming API yet. Stage/page progress is the smaller public surface unless a real standalone use case demonstrates a need for streaming partial page objects.
+
+## Example macOS app
+
+A signed, sandboxed demo app lives in `Examples/Demo` and is generated with XcodeGen. The generated `.xcodeproj` is intentionally not committed.
+
+Requirements:
+
+```sh
+brew install xcodegen
+```
+
+Generate and open the project:
+
+```sh
+make example-open
+```
+
+Build it from the command line:
+
+```sh
+make example-build
+```
+
+Or build and launch it:
+
+```sh
+make example-run
+```
+
+The example uses bundle identifier `com.hoangbkit.pdfkit.demo`, development team `J458WW3452`, automatic signing, hardened runtime, and App Sandbox with read-only access to user-selected PDFs. It imports the package through a local Swift package dependency (`../..`), so the example always exercises the checkout being edited.
 
 ## Current limitations
 
@@ -155,6 +183,6 @@ Run the package regression suite with:
 swift test
 ```
 
-Tests generate small PDF fixtures at runtime so binary fixture files are not required in the repository. CI exercises the declared macOS 14 package target; PDFKitAudio intentionally does not advertise untested iOS/iPadOS support.
+Tests generate small PDF fixtures at runtime so binary fixture files are not required in the repository. CI runs the package tests, generates the XcodeGen example, and builds the example on macOS 14 with code signing disabled for CI.
 
-Current hardening status: Phases 0-7 are complete. See `PHASE_STATUS.md` for completion tracking and `PLAN.md` for the original implementation design. The optional iOS branch described in the original Phase 7 plan was intentionally not pursued; the package remains macOS-only.
+The original hardening plan is retained in `PLAN.md` for historical design context. `PHASE_STATUS.md` records the completed package-hardening work; consuming-app integration is intentionally outside this repository's scope.
