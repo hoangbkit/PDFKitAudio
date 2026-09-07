@@ -16,7 +16,9 @@ public struct AudiobookSegment: Identifiable, Sendable {
     public var wordCount: Int { text.split { $0.isWhitespace }.count }
 }
 
-public final class PdfBook: @unchecked Sendable {
+/// Immutable parsed PDF result. All stored values are Sendable, so the book can
+/// safely cross Swift-concurrency boundaries without unchecked conformance.
+public final class PdfBook: Sendable {
     public let metadata: PdfMetadata
     public let pages: [PdfPageContent]
     public let chapters: [PdfChapter]
@@ -98,10 +100,8 @@ public final class PdfBook: @unchecked Sendable {
         )
     }
 
-    /// Preferred Phase 5 API. Adjacent short pieces may be packed across page
-    /// boundaries inside one chapter, with the exact union source range retained.
-    /// The configuration remains engine-agnostic; Spokio's TextToSpeech package
-    /// owns model token limits, prosody boundaries, and pause durations.
+    /// Preferred engine-agnostic API. Adjacent short pieces may be packed across
+    /// page boundaries inside one chapter, with the exact union source range kept.
     public func audiobookScript(
         configuration: TTSChunkingConfiguration
     ) -> [AudiobookSegment] {
@@ -154,11 +154,15 @@ public final class PdfBook: @unchecked Sendable {
                 maximumCharacters: configuration.maxCharacters,
                 mergesAcrossPages: mergesAcrossPages
             ) {
-                let id = stableSegmentID(
-                    chapterIndex: chapterIndex,
-                    order: globalOrder,
-                    sourcePageRange: piece.sourcePageRange,
-                    text: piece.text
+                let id = PdfStableIdentifier.make(
+                    prefix: "segment",
+                    components: [
+                        String(chapterIndex),
+                        String(globalOrder),
+                        String(piece.sourcePageRange.lowerBound),
+                        String(piece.sourcePageRange.upperBound),
+                        piece.text
+                    ]
                 )
                 segments.append(AudiobookSegment(
                     id: id,
@@ -204,30 +208,6 @@ public final class PdfBook: @unchecked Sendable {
 
         packed.append(current)
         return packed
-    }
-
-    private func stableSegmentID(
-        chapterIndex: Int,
-        order: Int,
-        sourcePageRange: ClosedRange<Int>,
-        text: String
-    ) -> String {
-        let identity = [
-            String(chapterIndex),
-            String(order),
-            String(sourcePageRange.lowerBound),
-            String(sourcePageRange.upperBound),
-            text
-        ].joined(separator: "|")
-
-        // Swift's Hasher is intentionally randomized between processes. FNV-1a
-        // keeps generated segment IDs stable for the same parsed book and config.
-        var hash: UInt64 = 14_695_981_039_346_656_037
-        for byte in identity.utf8 {
-            hash ^= UInt64(byte)
-            hash &*= 1_099_511_628_211
-        }
-        return "segment-" + String(hash, radix: 16)
     }
 }
 

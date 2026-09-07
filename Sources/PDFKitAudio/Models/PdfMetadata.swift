@@ -1,20 +1,21 @@
 import Foundation
 
-public struct PdfMetadata: Sendable {
-    public var title: String
-    public var authors: [String]
-    public var subject: String?
-    public var keywords: [String]
-    public var creator: String?
-    public var producer: String?
-    public var creationDate: Date?
-    public var modificationDate: Date?
-    public var pageCount: Int
-    public var isScanned: Bool
+/// Immutable metadata captured when a PDF is parsed.
+public struct PdfMetadata: Hashable, Sendable {
+    public let title: String
+    public let authors: [String]
+    public let subject: String?
+    public let keywords: [String]
+    public let creator: String?
+    public let producer: String?
+    public let creationDate: Date?
+    public let modificationDate: Date?
+    public let pageCount: Int
+    public let isScanned: Bool
 
     /// Detected document language when the parser actually has a reliable signal.
-    /// `nil` means unknown; the package no longer pretends every PDF is English.
-    public var detectedLanguage: String?
+    /// `nil` means unknown; PDFKitAudio never assumes English by default.
+    public let detectedLanguage: String?
 
     public init(
         title: String = "Untitled",
@@ -47,7 +48,7 @@ public struct PdfMetadata: Sendable {
     }
 }
 
-/// One navigation entry from the PDF outline.
+/// One immutable navigation entry from the PDF outline.
 ///
 /// Outline destinations are navigation metadata, not audiobook chapter boundaries.
 /// `pageIndex` is optional because real PDFs can contain unresolved, malformed, or
@@ -55,10 +56,10 @@ public struct PdfMetadata: Sendable {
 /// identity remains stable across repeated parses of the same document.
 public struct PdfTOCItem: Identifiable, Hashable, Sendable {
     public let id: String
-    public var title: String
-    public var pageIndex: Int?
-    public var level: Int
-    public var children: [PdfTOCItem]
+    public let title: String
+    public let pageIndex: Int?
+    public let level: Int
+    public let children: [PdfTOCItem]
 
     public init(
         id: String? = nil,

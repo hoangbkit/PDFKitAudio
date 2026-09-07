@@ -16,6 +16,46 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(chapter.readingTimeMinutes, 2)
     }
 
+    func testGeneratedChapterIdentityIsDeterministic() {
+        let first = PdfChapter(
+            title: "Chapter",
+            pageRange: 3...7,
+            order: 2,
+            plainText: "Stable chapter text.",
+            htmlPreview: "<p>Stable chapter text.</p>"
+        )
+        let second = PdfChapter(
+            title: "Chapter",
+            pageRange: 3...7,
+            order: 2,
+            plainText: "Stable chapter text.",
+            htmlPreview: "<p>Different derived preview does not change source identity.</p>"
+        )
+
+        XCTAssertEqual(first.id, second.id)
+        XCTAssertEqual(first, second)
+        XCTAssertTrue(first.id.hasPrefix("chapter-"))
+    }
+
+    func testGeneratedChapterIdentityChangesWithSourceContent() {
+        let first = PdfChapter(
+            title: "Chapter",
+            pageRange: 3...7,
+            order: 2,
+            plainText: "First text.",
+            htmlPreview: ""
+        )
+        let second = PdfChapter(
+            title: "Chapter",
+            pageRange: 3...7,
+            order: 2,
+            plainText: "Second text.",
+            htmlPreview: ""
+        )
+
+        XCTAssertNotEqual(first.id, second.id)
+    }
+
     func testBookAggregatesChapterMetricsWithoutPageModelsForCompatibility() {
         let first = PdfChapter(title: "One", pageRange: 0...0, order: 0, plainText: "one two three", htmlPreview: "")
         let second = PdfChapter(title: "Two", pageRange: 1...1, order: 1, plainText: "four five", htmlPreview: "")
@@ -220,6 +260,17 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(first, second)
         XCTAssertTrue(first.allSatisfy { $0.hasPrefix("segment-") })
     }
+
+    func testCoreParsedTypesAreSendable() {
+        requireSendable(PdfParser.self)
+        requireSendable(PdfBook.self)
+        requireSendable(PdfMetadata.self)
+        requireSendable(PdfChapter.self)
+        requireSendable(PdfTOCItem.self)
+        requireSendable(PdfPageContent.self)
+    }
+
+    private func requireSendable<T: Sendable>(_: T.Type) {}
 
     private func normalized(_ text: String) -> String {
         text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")

@@ -2,13 +2,24 @@ import AppKit
 import Foundation
 import PDFKit
 
-public final class PdfParser: @unchecked Sendable {
-    typealias OCRRecognizer = (PDFPage, PdfOCRConfiguration) -> PdfOCREngine.OCRResult?
+/// macOS PDF parser optimized for document-to-audio ingestion.
+///
+/// The parser itself is immutable and Sendable. Each parse execution creates and
+/// confines its own `PDFDocument`; PDFKit page access remains serial within that
+/// execution instead of sharing a document across concurrent tasks.
+public final class PdfParser: Sendable {
+    typealias OCRRecognizer = @Sendable (PDFPage, PdfOCRConfiguration) -> PdfOCREngine.OCRResult?
     public typealias ProgressHandler = @Sendable (PdfParseProgress) -> Void
 
-    public let ocrConfiguration: PdfOCRConfiguration
-    public let cleanupConfiguration: PdfCleanupConfiguration
-    public let extractCoverImage: Bool
+    public let configuration: PdfParserConfiguration
+
+    /// Compatibility aliases for callers that previously read individual parser
+    /// settings directly. New code should prefer `configuration`.
+    public var ocrConfiguration: PdfOCRConfiguration { configuration.ocr }
+    public var cleanupConfiguration: PdfCleanupConfiguration { configuration.cleanup }
+    public var extractCoverImage: Bool { configuration.extractCoverImage }
+    public var retainNativeText: Bool { configuration.retainNativeText }
+
     private let ocrRecognizer: OCRRecognizer
 
     /// Backward-compatible initializer for existing callers.
@@ -18,27 +29,38 @@ public final class PdfParser: @unchecked Sendable {
         cleanupConfiguration: PdfCleanupConfiguration = .audiobookDefault,
         extractCoverImage: Bool = true
     ) {
-        let configuration = PdfOCRConfiguration(
-            mode: ocrMode,
-            nativeTextThreshold: ocrThreshold
+        self.configuration = PdfParserConfiguration(
+            ocr: PdfOCRConfiguration(
+                mode: ocrMode,
+                nativeTextThreshold: ocrThreshold
+            ),
+            cleanup: cleanupConfiguration,
+            extractCoverImage: extractCoverImage
         )
-        self.ocrConfiguration = configuration
-        self.cleanupConfiguration = cleanupConfiguration
-        self.extractCoverImage = extractCoverImage
         self.ocrRecognizer = { page, configuration in
             PdfOCREngine.recognize(page: page, configuration: configuration)
         }
     }
 
-    /// Preferred initializer for multilingual OCR and cleanup configuration.
+    /// Compatibility initializer for callers that already configure OCR directly.
     public init(
         ocrConfiguration: PdfOCRConfiguration,
         cleanupConfiguration: PdfCleanupConfiguration = .audiobookDefault,
         extractCoverImage: Bool = true
     ) {
-        self.ocrConfiguration = ocrConfiguration
-        self.cleanupConfiguration = cleanupConfiguration
-        self.extractCoverImage = extractCoverImage
+        self.configuration = PdfParserConfiguration(
+            ocr: ocrConfiguration,
+            cleanup: cleanupConfiguration,
+            extractCoverImage: extractCoverImage
+        )
+        self.ocrRecognizer = { page, configuration in
+            PdfOCREngine.recognize(page: page, configuration: configuration)
+        }
+    }
+
+    /// Preferred consolidated initializer.
+    public init(configuration: PdfParserConfiguration) {
+        self.configuration = configuration
         self.ocrRecognizer = { page, configuration in
             PdfOCREngine.recognize(page: page, configuration: configuration)
         }
@@ -49,11 +71,15 @@ public final class PdfParser: @unchecked Sendable {
         ocrConfiguration: PdfOCRConfiguration,
         cleanupConfiguration: PdfCleanupConfiguration = .audiobookDefault,
         extractCoverImage: Bool = true,
+        retainNativeText: Bool = true,
         ocrRecognizer: @escaping OCRRecognizer
     ) {
-        self.ocrConfiguration = ocrConfiguration
-        self.cleanupConfiguration = cleanupConfiguration
-        self.extractCoverImage = extractCoverImage
+        self.configuration = PdfParserConfiguration(
+            ocr: ocrConfiguration,
+            cleanup: cleanupConfiguration,
+            extractCoverImage: extractCoverImage,
+            retainNativeText: retainNativeText
+        )
         self.ocrRecognizer = ocrRecognizer
     }
 
@@ -205,6 +231,21 @@ public final class PdfParser: @unchecked Sendable {
             configuration: cleanupConfiguration
         )
 
+        // Scanned-document metadata needs the raw native extraction signal. Compute
+        // it before optionally dropping retained native text from the final book.
+        let isScannedOverall = isLikelyScanned(pages: pages)
+        if !retainNativeText {
+            pages = pages.map { page in
+                PdfPageContent(
+                    pageIndex: page.pageIndex,
+                    nativeText: "",
+                    text: page.text,
+                    extractionSource: page.extractionSource,
+                    confidence: page.confidence
+                )
+            }
+        }
+
         try control.checkpoint()
         control.report(stage: .buildingChapters, completedPages: pageCount, totalPages: pageCount)
 
@@ -213,7 +254,6 @@ public final class PdfParser: @unchecked Sendable {
         let tableOfContents = PdfTOCParser.parse(document: document)
         try control.checkpoint()
         let chapters = PdfChapterBuilder.build(toc: tableOfContents, pages: pages)
-        let isScannedOverall = isLikelyScanned(pages: pages)
 
         let metadata = PdfMetadata(
             title: title,

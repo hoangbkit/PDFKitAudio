@@ -3,7 +3,7 @@ import XCTest
 @testable import PDFKitAudio
 
 final class PdfAsyncParserTests: XCTestCase {
-    func testAsyncParseMatchesSynchronousParse() async throws {
+    func testAsyncParseMatchesSynchronousParseIncludingDeterministicChapters() async throws {
         let data = try TestPDFBuilder.digitalPDF(pages: [
             "First source page with enough text to exercise the native extraction path.",
             "Second source page remains in deterministic document order.",
@@ -14,13 +14,10 @@ final class PdfAsyncParserTests: XCTestCase {
         let synchronousBook = try parser.parse(data: data)
         let asynchronousBook = try await parser.parseAsync(data: data)
 
-        XCTAssertEqual(asynchronousBook.metadata.pageCount, synchronousBook.metadata.pageCount)
-        XCTAssertEqual(asynchronousBook.metadata.isScanned, synchronousBook.metadata.isScanned)
+        XCTAssertEqual(asynchronousBook.metadata, synchronousBook.metadata)
         XCTAssertEqual(asynchronousBook.pages, synchronousBook.pages)
-        XCTAssertEqual(
-            asynchronousBook.chapters.map(ChapterSnapshot.init),
-            synchronousBook.chapters.map(ChapterSnapshot.init)
-        )
+        XCTAssertEqual(asynchronousBook.chapters, synchronousBook.chapters)
+        XCTAssertEqual(asynchronousBook.tableOfContents, synchronousBook.tableOfContents)
         XCTAssertEqual(asynchronousBook.allPlainText(), synchronousBook.allPlainText())
     }
 
@@ -119,24 +116,6 @@ final class PdfAsyncParserTests: XCTestCase {
         )
         XCTAssertEqual(bounded.completedPages, 4)
         XCTAssertEqual(bounded.pageFractionCompleted, 1)
-    }
-}
-
-private struct ChapterSnapshot: Equatable {
-    let title: String
-    let pageRange: ClosedRange<Int>
-    let order: Int
-    let plainText: String
-    let confidence: Double
-    let isOCRSourced: Bool
-
-    init(_ chapter: PdfChapter) {
-        title = chapter.title
-        pageRange = chapter.pageRange
-        order = chapter.order
-        plainText = chapter.plainText
-        confidence = chapter.confidence
-        isOCRSourced = chapter.isOCRSourced
     }
 }
 
