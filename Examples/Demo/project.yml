@@ -2,6 +2,8 @@ name: PDFKitAudioDemo
 
 options:
   minimumXcodeGenVersion: 2.45.4
+  xcodeVersion: "15.4"
+  projectFormat: xcode15_3
   createIntermediateGroups: true
   defaultConfig: Debug
   developmentLanguage: en
