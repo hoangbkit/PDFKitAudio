@@ -32,8 +32,8 @@ final class PdfLayoutRegionDetectorTests: XCTestCase {
 
         XCTAssertEqual(layout.primaryColumnCount, 3)
         XCTAssertEqual(layout.regions.count, 1)
-        XCTAssertEqual(layout.regions[0].kind, .columnar)
-        XCTAssertEqual(layout.regions[0].columns.count, 3)
+        XCTAssertEqual(layout.regions.first?.kind, .columnar)
+        XCTAssertEqual(layout.regions.first?.columns.count, 3)
     }
 
     func testMixedRegionsSplitAtSpanningBlocks() {
@@ -67,6 +67,7 @@ final class PdfLayoutRegionDetectorTests: XCTestCase {
         let layout = layoutForFixture(named: "columns-interrupted-by-caption")
 
         XCTAssertEqual(layout.regions.map(\.kind), [.columnar, .spanning, .columnar])
+        guard layout.regions.count == 3 else { return }
         XCTAssertEqual(layout.regions[0].columns.count, 2)
         XCTAssertEqual(layout.regions[2].columns.count, 2)
         XCTAssertEqual(layout.spanningBlockIDs.count, 1)
@@ -189,8 +190,8 @@ final class PdfLayoutRegionDetectorTests: XCTestCase {
 
         XCTAssertEqual(layout.primaryColumnCount, 2)
         XCTAssertEqual(layout.regions.count, 1)
-        XCTAssertEqual(layout.regions[0].kind, .columnar)
-        XCTAssertEqual(layout.regions[0].columns.count, 2)
+        XCTAssertEqual(layout.regions.first?.kind, .columnar)
+        XCTAssertEqual(layout.regions.first?.columns.count, 2)
     }
 
     private struct PipelineResult {
@@ -217,11 +218,41 @@ final class PdfLayoutRegionDetectorTests: XCTestCase {
             return PipelineResult(fragments: [], lines: [], blocks: [])
         }
 
+        // Match the geometry shape produced by PDFKit line selections: the
+        // rectangle wraps rendered glyphs, not the full fixture text box. Using
+        // declared box width here would artificially erase narrow gutters before
+        // Phase 4 receives the Phase 3 blocks.
         let fragments = page.boxes.enumerated().map { index, box in
-            PdfLayoutFragment(
+            let glyphWidth = min(
+                box.rect.width,
+                max(
+                    0.012,
+                    CGFloat(box.text.count) * box.fontSize * 0.50 / max(1, page.size.width)
+                )
+            )
+            let glyphHeight = min(
+                box.rect.height,
+                max(0.010, box.fontSize * 1.25 / max(1, page.size.height))
+            )
+            let x: CGFloat
+            switch box.alignment {
+            case .center:
+                x = box.rect.midX - glyphWidth / 2
+            case .right:
+                x = box.rect.maxX - glyphWidth
+            default:
+                x = box.rect.minX
+            }
+
+            return PdfLayoutFragment(
                 id: index,
                 text: box.text,
-                rect: box.rect,
+                rect: CGRect(
+                    x: max(0, min(1 - glyphWidth, x)),
+                    y: box.rect.minY,
+                    width: glyphWidth,
+                    height: glyphHeight
+                ),
                 source: page.rendering == .native ? .native : .ocr,
                 confidence: page.rendering == .native ? 1 : 0.90,
                 sourceOrder: index,
