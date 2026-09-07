@@ -52,10 +52,12 @@ targets:
     deploymentTarget: "14.0"
     sources:
       - path: Sources
-    resources:
       - path: TestFixtures/digital-text.pdf
+        buildPhase: resources
       - path: TestFixtures/outline-chapters.pdf
+        buildPhase: resources
       - path: TestFixtures/blank-page.pdf
+        buildPhase: resources
     dependencies:
       - package: PDFKitAudio
         product: PDFKitAudio
