@@ -141,15 +141,23 @@ enum PdfLayoutRoleClassifier {
     private static func detectTables(blocks: [PdfLayoutBlock]) -> [PdfDetectedTable] {
         let fragments = blocks.flatMap { $0.lines.flatMap(\.fragments) }
         let assessment = PdfLayoutComplexityDetector.assess(fragments: fragments)
-        let cells = blocks.flatMap { block in block.lines.map { PdfTableCell(blockID: block.id, lineID: $0.id, text: $0.text, rect: $0.rect) } }
+        let cells = positionedTableCells(blocks: blocks)
         guard cells.count >= 4 else { return [] }
 
         let tolerance = max(0.012, min(0.035, median(cells.map { $0.rect.height }) * 0.80))
-        let rows = clusterRows(cells, tolerance: tolerance).filter { $0.count >= 2 }.map { $0.sorted { $0.rect.minX < $1.rect.minX } }
+        let rows = clusterRows(cells, tolerance: tolerance)
+            .filter { $0.count >= 2 }
+            .map { $0.sorted { $0.rect.minX < $1.rect.minX } }
         guard rows.count >= 2 else { return [] }
+
         let maximumItems = rows.map(\.count).max() ?? 0
         let phase2Table = assessment.complexity == .likelyTableHeavy
-        let obviousThreeLaneGrid = maximumItems >= 3 && rows.filter { $0.count >= 3 }.count >= 2
+        let shortCellRatio = Double(cells.filter { semanticCount($0.text) <= 80 }.count) / Double(max(1, cells.count))
+        let medianCellWidth = median(cells.map { $0.rect.width })
+        let obviousThreeLaneGrid = maximumItems >= 3
+            && rows.filter { $0.count >= 3 }.count >= 2
+            && shortCellRatio >= 0.70
+            && medianCellWidth <= 0.24
         guard phase2Table || obviousThreeLaneGrid else { return [] }
 
         let columnCount = mode(rows.map(\.count)) ?? maximumItems
@@ -164,6 +172,26 @@ enum PdfLayoutRoleClassifier {
         let base = phase2Table ? assessment.confidence : 0.78
         let confidence = min(0.97, max(0.72, base * 0.70 + alignment * 0.30))
         return [PdfDetectedTable(cellsByRow: stableRows, columnCount: columnCount, headerRowIndex: headerIndex, confidence: confidence, linearizedText: linearized)]
+    }
+
+    /// Table semantics are fundamentally cell-oriented. A logical Phase 3 line
+    /// may legitimately contain several horizontally separated table cells, so
+    /// recovering cells from positioned source fragments avoids treating the
+    /// whole row as one cell. Phase 2/table-grid gates remain responsible for
+    /// preventing ordinary styled prose runs from being promoted to a table.
+    private static func positionedTableCells(blocks: [PdfLayoutBlock]) -> [PdfTableCell] {
+        blocks.flatMap { block in
+            block.lines.flatMap { line in
+                line.fragments.map { fragment in
+                    PdfTableCell(
+                        blockID: block.id,
+                        lineID: line.id,
+                        text: fragment.text,
+                        rect: fragment.rect
+                    )
+                }
+            }
+        }
     }
 
     private static func detectHeaderRow(_ rows: [[PdfTableCell]], blocks: [PdfLayoutBlock]) -> Int? {
