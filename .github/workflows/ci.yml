@@ -10,18 +10,10 @@ permissions:
   contents: read
 
 jobs:
-  phase9-fixture-diagnostics:
-    name: Phase 9 diagnostic — ${{ matrix.fixture }}
+  test:
+    name: SwiftPM + example (macOS 14)
     runs-on: macos-14
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        fixture:
-          - short-chapter-heading-body
-          - full-width-title-body
-          - three-column
-          - semantic-sentence-near-top
 
     steps:
       - name: Checkout
@@ -30,7 +22,11 @@ jobs:
       - name: Swift version
         run: swift --version
 
-      - name: Run isolated fixture gate
-        env:
-          PDFKITAUDIO_PHASE9_FIXTURE: ${{ matrix.fixture }}
-        run: swift test --filter PdfLayoutPhase9CategoryQualityTests/testSelectedFixtureFromEnvironment
+      - name: Run package tests
+        run: swift test
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Build generated example app
+        run: make example-build-ci
