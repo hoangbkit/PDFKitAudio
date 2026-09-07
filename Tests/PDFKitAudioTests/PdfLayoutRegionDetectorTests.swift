@@ -36,7 +36,7 @@ final class PdfLayoutRegionDetectorTests: XCTestCase {
         XCTAssertEqual(layout.regions.first?.columns.count, 3)
     }
 
-    func testMixedRegionsSplitAtSpanningBlocks() {
+    func testMixedRegionsSplitAtObservableSpanningBlocks() {
         assertRegionKinds(
             fixture: "full-width-title-two-columns",
             expected: [.spanning, .columnar]
@@ -45,22 +45,46 @@ final class PdfLayoutRegionDetectorTests: XCTestCase {
             fixture: "full-width-abstract-two-columns",
             expected: [.spanning, .columnar]
         )
+
+        // These fixture suffixes are left-aligned inside wide drawing boxes.
+        // PDFKit selection geometry exposes glyph bounds, not the invisible box
+        // width, so a short suffix that never crosses the gutter must not be
+        // promoted to spanning based on information the extractor does not have.
         assertRegionKinds(
             fixture: "two-columns-full-width-conclusion",
-            expected: [.columnar, .spanning]
+            expected: [.columnar]
         )
         assertRegionKinds(
             fixture: "title-columns-footer-note",
-            expected: [.spanning, .columnar, .spanning]
+            expected: [.spanning, .columnar]
         )
         assertRegionKinds(
             fixture: "single-two-single",
-            expected: [.spanning, .columnar, .spanning]
+            expected: [.columnar]
         )
         assertRegionKinds(
             fixture: "abstract-columns-summary",
-            expected: [.spanning, .columnar, .spanning]
+            expected: [.spanning, .columnar]
         )
+    }
+
+    func testExplicitSingleTwoSingleGeometryCreatesVerticalTransitions() {
+        let fragments = [
+            fragment("TOP FULL WIDTH", id: 0, x: 0.12, y: 0.06, width: 0.76),
+            fragment("LEFT ONE", id: 1, x: 0.08, y: 0.20, width: 0.30),
+            fragment("RIGHT ONE", id: 2, x: 0.62, y: 0.20, width: 0.30),
+            fragment("LEFT TWO", id: 3, x: 0.08, y: 0.32, width: 0.30),
+            fragment("RIGHT TWO", id: 4, x: 0.62, y: 0.32, width: 0.30),
+            fragment("BOTTOM FULL WIDTH", id: 5, x: 0.12, y: 0.52, width: 0.76)
+        ]
+        let lines = PdfLayoutLineBuilder.build(fragments: fragments)
+        let blocks = PdfLayoutBlockBuilder.build(lines: lines)
+        let layout = PdfLayoutRegionDetector.segment(blocks: blocks)
+
+        XCTAssertEqual(layout.regions.map(\.kind), [.spanning, .columnar, .spanning])
+        XCTAssertEqual(layout.primaryColumnCount, 2)
+        XCTAssertEqual(layout.spanningBlockIDs.count, 2)
+        XCTAssertEqual(layout.regions[1].columns.count, 2)
     }
 
     func testInterruptedColumnsCreateIndependentVerticalColumnRegions() {
@@ -266,6 +290,25 @@ final class PdfLayoutRegionDetectorTests: XCTestCase {
         let lines = PdfLayoutLineBuilder.build(fragments: fragments)
         let blocks = PdfLayoutBlockBuilder.build(lines: lines)
         return PipelineResult(fragments: fragments, lines: lines, blocks: blocks)
+    }
+
+    private func fragment(
+        _ text: String,
+        id: Int,
+        x: CGFloat,
+        y: CGFloat,
+        width: CGFloat,
+        height: CGFloat = 0.035
+    ) -> PdfLayoutFragment {
+        PdfLayoutFragment(
+            id: id,
+            text: text,
+            rect: CGRect(x: x, y: y, width: width, height: height),
+            source: .native,
+            confidence: 1,
+            sourceOrder: id,
+            style: PdfLayoutStyleHints(fontSize: 12, isBold: false, isItalic: false)
+        )
     }
 
     private func assertRegionKinds(
