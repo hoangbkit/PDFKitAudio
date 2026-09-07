@@ -7,7 +7,7 @@ This PR started as a planning-only change and is now implementing the approved p
 - [x] Phase 2 — page complexity detector and fast-path gate
 - [x] Phase 3 — fragment-to-line and line-to-block reconstruction
 - [x] Phase 4 — columns, spanning regions, and vertical segmentation
-- [ ] Phase 5 — reading-order DAG and deterministic resolver
+- [x] Phase 5 — reading-order DAG and deterministic resolver
 - [ ] Phase 6 — lightweight role classification and special structures
 - [ ] Phase 7 — geometry-aware document cleanup
 - [ ] Phase 8 — parser integration, selection policy, and public configuration
@@ -77,5 +77,20 @@ This PR started as a planning-only change and is now implementing the approved p
 - Added regressions ensuring real interrupted columns recover `columnar → spanning → columnar`, real sidebars remain non-primary, and wide ordinary single-column text is not over-split.
 - Phase 4 remains internal and does not alter `PdfParser` selected text or public API.
 - The final Phase 4 head passed SwiftPM tests and the generated macOS example-app build on macOS 14.
+
+### Phase 5
+
+- Added `PdfReadingOrderEdge`, `PdfReadingOrderHints`, `PdfReadingOrderResult`, and a deterministic `PdfReadingOrderResolver` built around an explicit precedence DAG rather than a large comparator.
+- Same-column blocks receive top-to-bottom precedence; primary columns are sequenced column-major left-to-right or right-to-left according to the resolved writing direction; vertical regions receive explicit region-to-region edges.
+- Spanning regions naturally precede/follow neighboring column regions, and observable trailing cross-column summaries/footers that Phase 4 conservatively associates with one lane are deferred until every primary column finishes.
+- Sidebars default to spoken order after the primary region, with a geometric policy available internally for later experimentation.
+- Semantic ordering is intentionally decoupled from role discovery: Phase 5 accepts optional footnote, caption-anchor, writing-direction, unknown-block, and additional-precedence hints; Phase 6 will be responsible for classifying blocks and producing those hints.
+- Footnote hints place notes after main body; caption attachments place captions after their anchors; stronger semantic constraints can override weaker geometric edges through deterministic cycle resolution.
+- Cycles never drop blocks: the resolver removes the lowest-confidence inferred edge with stable tie-breaking, records the removal diagnostic, and retries topological sorting.
+- Ambiguous irregular overlap, missing region assignments, and duplicate block identifiers fail safe to deterministic geometry/source ordering rather than crashing or silently losing content.
+- Reading-order confidence incorporates region/column confidence, removed cycle edges, unknown blocks, and strong geometry conflicts.
+- Exact-order tests cover all supported column and mixed-region fixtures, plus repeated determinism, LTR/RTL sequencing, sidebar policy, footnote/caption hints, forced cycles, irregular-overlap fallback, missing-assignment fallback, duplicate-ID safety, and real PDFKit two-column ordering.
+- Every successful/fallback ordering path is checked for deterministic block conservation; parser-selected text and public API remain unchanged until Phase 8.
+- The Phase 5 gate passed all SwiftPM tests and the generated macOS example-app build on macOS 14.
 
 Each phase is marked complete only after its exit criteria are satisfied and CI is green.
