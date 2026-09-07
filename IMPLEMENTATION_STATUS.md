@@ -9,7 +9,7 @@ This PR started as a planning-only change and is now implementing the approved p
 - [x] Phase 4 — columns, spanning regions, and vertical segmentation
 - [x] Phase 5 — reading-order DAG and deterministic resolver
 - [x] Phase 6 — lightweight role classification and special structures
-- [ ] Phase 7 — geometry-aware document cleanup
+- [x] Phase 7 — geometry-aware document cleanup
 - [ ] Phase 8 — parser integration, selection policy, and public configuration
 - [ ] Phase 9 — comprehensive real-world and adversarial testing
 - [ ] Phase 10 — hardening, diagnostics, documentation, and rollout
@@ -109,5 +109,23 @@ This PR started as a planning-only change and is now implementing the approved p
 - Real generated PDFKit integration tests validate table structure/linearization, caption role plus anchor hint, and strong footnote classification through the full native extraction → line/block reconstruction → region → role-analysis pipeline.
 - Phase 6 remains internal and does not alter `PdfParser` selected text or public API; parser/analyzer integration remains deferred to Phase 8.
 - The Phase 6 gate passed all SwiftPM tests and the generated macOS example-app build on macOS 14, including the real PDFKit integration suite.
+
+### Phase 7
+
+- Added compact document-level layout fingerprints containing normalized line signatures, normalized block geometry, page/block identity, role confidence, and an optional coarse style bucket; raw block text and full page layout graphs are not retained across the document.
+- Refactored `PdfDocumentTextCleaner` into one removal pass where existing text-only first/last-line heuristics remain the fallback and geometry augments candidate discovery/evidence instead of creating a second competing cleaner.
+- Geometry can discover recurrent edge text outside the legacy first/last-two-line windows by matching normalized fingerprint signatures back to canonical selected page text.
+- Repeated running matter now requires both textual recurrence and a stable normalized Y-zone when enough analyzed-page geometry is available; enough inconsistent geometry becomes evidence against deletion rather than falling back to a looser guess.
+- Horizontal movement is intentionally tolerated inside a stable header/footer zone so mirrored even/odd headers and moving footer page numbers remain detectable.
+- Existing conservative recurrence thresholds are preserved: ordinary repeated running matter needs at least four document pages plus the established recurrence threshold, while pure pagination still requires a three-page sequence.
+- Identical headers, alternating even/odd headers, decorated pagination, and pure numeric pagination retain their previous first-semantic-occurrence/non-semantic-pagination semantics.
+- Confident semantic heading occurrences can replace an earlier geometric running-header copy as the single preserved semantic occurrence; final protection also prevents a short-page line classified as both legacy top and bottom from being deleted through the wrong edge side.
+- Proven pure pagination remains removable even if a misleading role hint exists, while legitimate years/quantities near page edges are not treated as pagination without a valid page-index sequence.
+- Mixed analyzed/fast-path pages share the same document cleanup/removal set, preventing duplicate cleanup passes and preserving the text-only fallback for pages without geometry.
+- Optional style information is supporting/diagnostic metadata only; a regression with identical small-font style but inconsistent geometry proves font size alone cannot cause removal.
+- Added deterministic regressions for headers outside legacy edge windows, inconsistent geometry, horizontally moving page numbers, legitimate years, semantic chapter-heading anchors, two-occurrence semantic edge text, documents shorter than four pages, mixed analyzed/fast-path documents, alternating headers, and repeated-run determinism.
+- Added real generated PDFKit integration for identical and alternating running headers through native positioned extraction → line/block reconstruction → regions/roles → compact fingerprints → document cleanup; alternating recurrence is validated on eight pages so the production evidence threshold is not weakened for the test.
+- Existing document-cleanup/parser behavior remains source-compatible because `layoutFingerprints` defaults to empty; parser production wiring remains intentionally deferred to Phase 8.
+- The Phase 7 gate passed the full SwiftPM suite and generated macOS example-app build on macOS 14.
 
 Each phase is marked complete only after its exit criteria are satisfied and CI is green.
