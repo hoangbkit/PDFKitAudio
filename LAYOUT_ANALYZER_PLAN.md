@@ -1,6 +1,6 @@
 # PDFKitAudio Layout Analyzer Plan
 
-> Status: **planning only**. This document intentionally contains no implementation work.
+> Status: **implementation in progress on PR #3**. Phase 0 is being implemented first; later phases remain gated by the exit criteria in this document.
 >
 > Baseline: `master` at `294e9dce6c67cb717f6220b34ef7124ace4962fb`.
 
@@ -481,643 +481,617 @@ Do not perform audiobook cleanup here. Keep source line breaks and hyphen eviden
 
 ### Tests
 
-- split glyph/runs reconstruct one line
-- correct spaces between fragments
-- punctuation spacing
-- indented first line remains same paragraph
-- hanging indent remains coherent
-- bullet/list items remain distinct
-- heading remains separate from body
-- columns never merge across gutter
-- footnote text does not merge into body above
-- narrow sidebar does not merge into adjacent body
-- CJK lines do not receive inappropriate ASCII spaces
-- RTL line ordering where deterministic platform support exists
+- same-line fragments merge despite small baseline noise
+- adjacent lines form paragraphs
+- paragraph spacing creates block boundaries
+- first-line indentation stays in one block
+- two columns never merge across gutter
+- full-width heading stays separate from body columns
+- punctuation spacing is preserved
+- superscripts do not vanish
+- mixed scripts remain intact
 
 ### Exit criteria
 
-- Every supported fixture produces deterministic lines and blocks.
-- No block crosses an established strong gutter.
-- Text conservation invariant passes: normalized concatenated fragment text equals normalized concatenated block text, except explicitly recorded deduplication.
+- line/block reconstruction is deterministic
+- no text loss on supported fixtures
+- no cross-column merges on canonical column fixtures
 
 ## 11. Phase 4 — Columns, spanning regions, and vertical segmentation
 
 ### Objective
 
-Infer page regions before establishing reading order.
+Infer the page's coarse layout structure before assigning final reading order.
 
-### Column detection
+### Horizontal density projection
 
-Use multiple mutually reinforcing signals:
+Project fragment/block occupancy onto normalized X. Persistent low-density X intervals are candidate gutters. Score gutters using:
 
-1. X-axis text-density projection.
-2. Persistent vertical whitespace valleys.
-3. Clusters of block left/right edges.
-4. Vertical continuity of candidate lanes.
-5. Low cross-gutter block overlap.
+- width relative to median character/line height
+- vertical persistence
+- amount of text on each side
+- how few blocks cross the candidate gutter
+- whether left/right lanes have repeated aligned edges
 
-A gutter must persist across enough vertical extent to count as a column separator. Local paragraph indentation is not a column.
+Do not treat a temporary paragraph indent or centered heading as a column gutter.
 
-Support 1-3 primary columns initially. More than three should be treated as irregular/table-like unless confidence is exceptionally strong.
+### Vertical segmentation
 
-### Spanning-block detection
-
-A block is a spanning candidate when it:
-
-- overlaps multiple detected column lanes, or
-- occupies a large proportion of page width, and
-- has meaningful vertical separation or style evidence.
-
-Spanning blocks divide the page into vertical regions. Each region can have a different column model.
-
-Example:
+A page can change layout by Y. Partition into vertical regions when spanning blocks or major lane changes provide strong evidence:
 
 ```text
-[ full-width title ]
---------------------
-[left col][right col]
-[left col][right col]
---------------------
-[ full-width summary ]
+full-width title
+----------------
+two-column body
+----------------
+full-width caption
+----------------
+two-column continuation
+----------------
+full-width conclusion
 ```
 
-must be modeled as three vertical regions, not one page-wide two-column sort.
+Analyze columns separately inside each region rather than assigning one column model to the entire page.
 
-### Sidebar distinction
+### Column requirements
 
-A narrow lane should be classified as a sidebar candidate rather than a primary column when it has low vertical continuity, substantially smaller width, and is surrounded vertically by a dominant body lane.
+Support at minimum:
+
+- 1 column
+- 2 symmetric columns
+- 2 asymmetric columns
+- 3 columns
+- columns beginning/ending at different Y positions
+- narrow and wide gutters
+
+Use deterministic left-to-right ordering for LTR regions. Preserve enough writing-direction metadata to support RTL region ordering later.
 
 ### Tests
 
-- all two-/three-column fixtures
-- asymmetric columns
-- narrow/wide gutters
-- unequal column heights
-- spanning heading
-- abstract then columns
-- columns then conclusion
-- multiple span transitions
-- sidebar vs true second column
-- pull quote vs primary column
-- figure/caption interruption
+- every Phase 0 column fixture
+- every mixed vertical-region fixture
+- centered heading must not create fake columns
+- short sidenote must not split body into columns
+- table cells should not make the whole page appear as N body columns
 
 ### Exit criteria
 
-- Canonical supported fixtures receive the expected region/column assignment.
-- No primary-column detector mistakes ordinary paragraph indentation for a gutter.
-- Region boundaries are deterministic and stable under small coordinate perturbations.
+- correct lane count on canonical column fixtures
+- correct vertical region boundaries on mixed-layout fixtures
+- stable results under small coordinate perturbations
 
-## 12. Phase 5 — Reading-order DAG and deterministic resolver
+## 12. Phase 5 — Reading-order resolver and safe fallback
 
 ### Objective
 
-Turn blocks/regions into a safe spoken sequence.
+Convert blocks and regions into a deterministic spoken order.
 
-### Why a graph
+### Graph model
 
-Avoid a giant comparator that mixes X and Y heuristics. Instead, add precedence edges only when evidence is strong, then topologically sort.
+Represent strong ordering constraints as a directed acyclic graph when possible.
 
-### Core precedence rules
+Examples:
 
-Within a vertical region:
+- same column: upper block -> lower block
+- spanning heading above region -> first blocks of all lanes
+- left column completion -> right column beginning for LTR body regions
+- full-width region N -> following region N+1
+- body paragraph -> tightly associated caption when caption relationship is strong
 
-- same primary column: upper block precedes lower block
-- LTR multi-column: final block of left column precedes first block of next column
-- RTL multi-column: inverse horizontal column order when dominant document/page direction is confidently RTL
-- spanning block above a column region precedes all blocks in that region
-- spanning block below a column region follows all blocks in that region
-- caption strongly attached to a figure/table region follows its anchor region
-- footnote region follows the main body region for the page
+Avoid adding weak edges simply because two blocks have nearby Y values.
 
-Across vertical regions:
+### Topological sort
 
-- earlier region precedes later region
+Use deterministic Kahn-style topological sorting with stable tie-breaking:
 
-### Cycle handling
+1. region order
+2. column order
+3. normalized Y
+4. normalized X
+5. source order / stable ID
 
-Cycles indicate conflicting heuristics. Never drop blocks. Resolve by removing the lowest-confidence inferred edge, record a diagnostic, and retry topological sort. Final fallback is deterministic geometric/source order.
+### Cycles and ambiguity
+
+Cycles indicate contradictory geometry heuristics. Never arbitrarily delete content.
+
+Resolution policy:
+
+1. identify weakest-confidence edge in cycle
+2. remove it deterministically
+3. recompute
+4. reduce layout confidence
+5. if confidence falls below threshold, fall back to current page text
 
 ### Confidence
 
-Produce a page reading-order confidence from:
+Derive page layout confidence from evidence quality, including:
 
-- strength of detected gutters/regions
-- ambiguity of block assignments
-- number of removed graph edges
-- number of unknown blocks
-- geometry overlap conflicts
+- gutter persistence
+- block alignment consistency
+- amount of ambiguous overlap
+- number/strength of removed graph edges
+- text conservation
+- role-classification certainty where roles affect ordering
 
-Low-confidence analyzed output should be compared against the existing fast-path text and may be rejected.
+Do not expose a fake precise statistical probability; this is a heuristic confidence score.
+
+### Comparison against native text
+
+Before accepting reconstructed output, compare it to native/OCR selected text:
+
+- similar information/character coverage
+- no unexplained disappearance of unique tokens
+- no large duplicate expansion
+- output is non-empty when source was non-empty
+
+If invariants fail, fall back.
 
 ### Tests
 
-- exact marker sequence for every supported complex fixture
-- deterministic result across repeated parses
-- intentionally ambiguous overlap fixture triggers fallback rather than text loss
-- forced cycle fixture preserves all blocks
-- LTR and RTL column sequencing
-- headings before columns
-- footnotes after body
-- sidebars follow configured attachment policy
+- exact marker order for canonical column fixtures
+- mixed vertical regions
+- unequal column heights
+- overlapping floating blocks
+- intentionally ambiguous/cyclic synthetic layouts
+- deterministic cycle resolution
+- fallback preserves old text exactly enough for current public behavior
 
 ### Exit criteria
 
-- Supported generated fixtures produce exact expected marker order.
-- No block appears twice or disappears.
-- Every graph resolves deterministically.
+- high-confidence complex fixtures produce expected spoken marker order
+- low-confidence fixtures safely use current path
+- no content loss in accepted analyzer output
 
-## 13. Phase 6 — Lightweight role classification and special structures
+## 13. Phase 6 — Lightweight role classification
 
 ### Objective
 
-Improve spoken ordering for common non-body structures without introducing a heavyweight semantic model.
+Improve ordering and spoken usefulness with transparent geometry/style heuristics without turning PDFKitAudio into a general semantic model.
 
-### Role scoring
+### Roles
 
-Use transparent heuristic scores from:
+#### Heading
 
-- relative font size when available
-- block width/height
-- text length
+Evidence:
+
+- font size relative to page/body median when available
+- font weight when available
+- short text length
 - whitespace above/below
-- centeredness
-- indentation
-- page position
-- repeated alignment patterns
-- proximity to body/table regions
-- repeated X positions and Y bands
-- punctuation/list prefixes
+- centered or spanning placement
+- existing chapter-heading lexical patterns as weak supporting evidence
 
-Roles are hints, not destructive truth.
+#### Body
 
-### Heading
+Evidence:
 
-Strong signals:
+- dominant column widths
+- repeated paragraph alignment
+- typical font size/line spacing
 
-- larger font than page median
-- short text
-- surrounding whitespace
-- centered/full-width placement
-- position before body region
+#### Sidebar / callout / pull quote
 
-Heading classification should improve region boundaries and chapter heuristics later, but ordinary text must remain readable if misclassified.
+Evidence:
 
-### Lists
+- narrow lane outside dominant body lane
+- vertical overlap with body paragraphs
+- different alignment or font size
+- does not persist like running matter
 
-Preserve list item boundaries and marker text. Do not merge adjacent bullets into one paragraph.
+Default policy: preserve and speak; role only affects placement.
 
-### Sidebars / pull quotes
+#### Caption
 
-Default spoken policy: **preserve**, never silently skip. Attach a sidebar to the closest compatible body region and speak it after that body region unless there is stronger source ordering evidence.
+Evidence:
 
-Expose skip/include policy only if there is a clear consuming-app need; avoid premature public configuration.
+- smaller text near a non-text gap/image region if detectable
+- lexical prefix such as Figure/Fig./Table only as supporting evidence
+- centered/narrow placement below/above another region
 
-### Captions
+#### Footnote
 
-Attach captions using geometric proximity, width alignment, smaller style hints, and short text. Speak after the nearby anchored region. If the anchor cannot be inferred, preserve caption in geometric order.
+Evidence:
 
-### Footnotes
+- bottom-of-page geometry
+- smaller font
+- separated from body by gap/rule
+- numeric/symbol prefix only as supporting evidence
 
-Detect a bottom-page footnote region only with strong evidence such as:
+#### List
 
-- small text relative to body
-- horizontal rule / strong separation when detectable
-- concentrated bottom zone
-- reference-marker patterns
+Evidence:
 
-Do not treat every small bottom paragraph as a footnote.
-
-### Tables
-
-Table detection signals:
-
-- repeated X positions across multiple Y bands
-- multiple short blocks/cells per row
-- aligned column boundaries
-- dense local grid-like geometry
-
-Initial supported table policy:
-
-1. Detect a table region.
-2. Cluster rows by Y and cells by stable X lanes.
-3. If row/column structure confidence is high, linearize row-major.
-4. If a clear header row exists, use header-aware spoken text where deterministic.
-5. If table structure confidence is low, preserve conservative row-major geometric text rather than inventing relationships.
-
-Example preferred output for a confident simple table:
-
-```text
-Name: Apple. Revenue: 100. Growth: 12 percent.
-Name: Google. Revenue: 90. Growth: 8 percent.
-```
-
-Do not attempt merged-cell/nested-table semantics in the first implementation. Such tables must degrade without losing text.
+- repeated bullet/number prefixes
+- common hanging indentation
+- aligned continuation lines
 
 ### Tests
 
-- headings of different sizes/alignment
-- bullets and numbered lists
-- left/right sidebars
-- pull quotes
-- captions above/below
-- footnotes vs legitimate bottom text
-- simple bordered and borderless tables
-- table with header
-- numeric table
-- multi-line table cells
-- ambiguous table-like list must remain readable
+Each classifier must have positive and negative fixtures. Examples:
+
+- centered poem is not a heading merely because centered
+- numbered prose is not automatically a list
+- small body text is not automatically a footnote
+- narrow main column is not automatically a sidebar
 
 ### Exit criteria
 
-- No role classifier removes text.
-- Confident simple tables linearize deterministically.
-- Low-confidence special structures degrade to ordered blocks.
+- roles improve reading order without being necessary for core column correctness
+- ambiguous roles resolve to `.unknown`/`.body`, not destructive classification
 
-## 14. Phase 7 — Geometry-aware document cleanup
-
-### Objective
-
-Improve recurring-header/footer/page-number removal using layout information while preserving the conservative philosophy of the existing `PdfDocumentTextCleaner`.
-
-### Document-level fingerprints
-
-Retain only small per-block fingerprints after page analysis:
-
-- normalized text signature
-- normalized rect / Y zone
-- role hint
-- page index
-- optional style bucket
-
-### Running-matter detection
-
-Require both textual recurrence and geometric consistency. Support:
-
-- identical running headers
-- alternating even/odd headers
-- chapter-title running headers
-- decorated pagination
-- pure pagination
-
-Keep the existing principle that repeated semantic text should retain a safe first occurrence unless the evidence specifically proves non-semantic pagination.
-
-### Integration strategy
-
-Do not create two independent cleaners that can double-remove content. Refactor document cleanup so text-only logic remains the fallback while geometry augments confidence when layout metadata exists.
-
-### Tests
-
-- all existing cleanup tests unchanged
-- alternating headers
-- moving page number within footer zone
-- legitimate years/quantities near edge
-- chapter heading identical to later running header
-- short semantic top line appearing only twice
-- documents with fewer than four pages
-- mixed analyzed/fast-path pages
-
-### Exit criteria
-
-- Existing cleanup behavior does not regress.
-- Geometry improves recurring-matter precision on complex layouts.
-- No removal depends on font size alone.
-
-## 15. Phase 8 — Parser integration, selection policy, and public configuration
+## 14. Phase 7 — Tables and audiobook-friendly table preservation
 
 ### Objective
 
-Integrate the analyzer into the actual selected-text path without destabilizing the package API.
+Detect common tables and keep them coherent in reading order without promising perfect spreadsheet reconstruction.
 
-### Recommended configuration
+### Detection
 
-Keep the public surface small. A likely shape is:
+Use repeated X alignments and Y bands:
+
+- many short fragments/lines sharing row bands
+- several stable cell-start X positions
+- repeated column boundaries
+- compact vertical spacing
+- optional ruling-line evidence only if cheaply available; do not depend on it
+
+Ensure numbered lists and multi-column prose are strong negative cases.
+
+### Initial linearization
+
+Keep table handling conservative. Build row/cell groups where geometry is clear, then emit deterministic row-major text. Do not invent headers or semantic relationships unless geometry strongly supports them.
+
+Possible internal representation:
 
 ```swift
-enum PdfLayoutMode: Sendable {
-    case auto
+struct PdfLayoutTable {
+    let rows: [[PdfLayoutBlock]]
+    let rect: CGRect
+    let confidence: Double
+}
+```
+
+For TTS, a later policy can decide whether to add phrases such as "Table" or header labels. The layout layer should initially preserve content/order without inserting fabricated speech.
+
+### Tests
+
+All Phase 0 table fixtures plus negatives:
+
+- numbered list
+- glossary-style hanging indent
+- two-column article
+- aligned code-like text
+
+### Exit criteria
+
+- common small tables remain contiguous in spoken order
+- table detection does not break normal prose columns
+- no cells are silently lost
+
+## 15. Phase 8 — Geometry-aware document running matter cleanup
+
+### Objective
+
+Improve existing header/footer/page-number cleanup by adding position fingerprints while retaining its conservative semantics.
+
+### Fingerprint
+
+For candidate edge text record small normalized metadata:
+
+```text
+normalized text
+edge side
+normalized Y band
+normalized X band / alignment
+page parity
+numeric template where relevant
+```
+
+This permits detection of:
+
+- alternating left/right headers
+- chapter-title headers occupying stable positions
+- page numbers whose textual decorations vary slightly
+
+### Preserve current safety rules
+
+- require evidence across multiple pages
+- preserve a first semantic occurrence for running text when appropriate
+- sequential numbers require proven sequence
+- standalone years/quantities must not be removed based on position alone
+- short semantic sentences near the edge should survive without repetition evidence
+
+### Tests
+
+All running-matter fixtures plus:
+
+- alternating X position by page parity
+- chapter transition changes running header text
+- sparse headers in only part of a document
+- year sequence at bottom that looks like pagination but is semantic
+
+### Exit criteria
+
+- increased removal precision/recall on known running matter
+- no regression of current conservative numeric safety tests
+
+## 16. Phase 9 — Parser integration, configuration, and provenance
+
+### Objective
+
+Integrate layout analysis into `PdfParser` without destabilizing public callers.
+
+### Configuration
+
+Add a small public configuration surface only when behavior is proven. Candidate shape:
+
+```swift
+public enum PdfLayoutMode: Sendable {
+    case automatic
     case never
     case always
 }
+```
 
-struct PdfLayoutConfiguration: Sendable {
-    var mode: PdfLayoutMode
+Potential configuration:
+
+```swift
+public struct PdfLayoutConfiguration: Sendable {
+    public let mode: PdfLayoutMode
+    public let minimumComplexityConfidence: Double
+    public let minimumReadingOrderConfidence: Double
 }
 ```
 
-Default should be `.auto`.
+Avoid exposing every heuristic threshold. Internal tuning should remain implementation detail.
 
-Avoid exposing dozens of heuristic thresholds. Thresholds are implementation details and should remain internal unless a real caller demonstrates a tuning need.
+Default should be `.automatic` only after regression quality is established; until then implementation can remain opt-in/internal.
 
-### Selection policy
+### Parser order
 
 For each page:
 
-1. Obtain native text and native quality.
-2. Invoke OCR according to the existing OCR policy.
-3. Preserve positioned observations for the selected extraction candidate.
-4. Run complexity detection.
-5. If page is simple, retain existing selected text.
-6. If page is complex and layout confidence is sufficient, produce analyzed text.
-7. Compare analyzed output against conservation/sanity invariants.
-8. If invariants fail or confidence is too low, fall back to current selected text.
-9. Continue existing cleanup.
+1. extract native text
+2. decide whether OCR is required using existing OCR policy
+3. obtain positioned fragments for selected source(s)
+4. classify page complexity
+5. run analyzer only when requested/justified
+6. validate reconstructed text against source invariants
+7. choose analyzer text or current fallback
+8. run existing `PdfTextCleaner`
+9. retain page provenance
 
-### Sanity invariants before accepting analyzed output
+### Provenance additions
 
-- no major text loss relative to fragment information count
-- no duplicated block IDs
-- no empty output when source text is meaningful
-- output character/information count within a safe ratio of source fragments
-- all expected fragments accounted for or explicitly deduplicated
+Consider internal diagnostics or an additive model field that records whether layout analysis affected a page. Do not overload `.native`/`.ocr`; those describe text source, not ordering strategy.
 
-### Progress and cancellation
+Potential future additive metadata:
 
-Layout analysis is page-local. Cancellation should be checked:
+```text
+layoutAnalyzed: Bool
+layoutConfidence: Double?
+layoutComplexity: ...
+```
 
-- before geometry extraction if expensive
-- before layout analysis
-- after layout analysis
+Only expose publicly if it provides real caller value.
 
-Avoid casually adding a new public `PdfParseStage` case because downstream exhaustive switches may break. Initially report layout work inside `extracting` unless a deliberate API-versioning decision is made.
+### Cancellation/performance
 
-### Provenance
-
-Keep `PdfPageContent.extractionSource` meaning native vs OCR. Layout analysis is not a new extraction source; it is a transformation of the selected source. If diagnostics need to expose layout usage, prefer a separate optional/internal field rather than overloading extraction provenance.
+- preserve per-page cancellation checks
+- never retain Vision page images after page completion
+- complexity detector should be cheaper than full analyzer
+- native geometry extraction must remain bounded
+- avoid page-parallel PDFKit access unless its safety contract changes
 
 ### Tests
 
-- `.never` produces current behavior
-- `.always` analyzes supported pages
-- `.auto` preserves simple fast path
-- OCR/native selection still follows existing policy
-- mixed native/scanned complex document
-- cancellation during large complex document
-- progress monotonicity remains valid
-- stable IDs/provenance preserved
+- existing parser tests unchanged
+- `.never` exactly preserves current behavior
+- `.automatic` stays on fast path for ordinary books
+- `.always` analyzes when geometry exists but still falls back on invariant failure
+- cancellation through layout work
+- progress remains monotonic
+- page provenance/indexes unchanged
+- OCR/native source selection semantics unchanged
 
 ### Exit criteria
 
-- Layout-aware text is used only when safe.
-- Existing simple-document output is byte-equivalent or intentionally documented where exact PDFKit formatting prevents that guarantee.
-- Existing public initializers remain source-compatible.
+- public behavior is backward compatible
+- no chapter/TTS source mapping regressions
+- layout mode semantics are documented and deterministic
 
-## 16. Phase 9 — Comprehensive real-world and adversarial testing
-
-### Objective
-
-Move beyond synthetic correctness and prove the analyzer against many layout families.
-
-### Test corpus strategy
-
-Use three layers.
-
-#### Layer A — deterministic generated PDFs
-
-The Phase 0 matrix is the primary CI suite because it is reproducible and legally uncomplicated.
-
-Target: at least **50 distinct layout fixtures**, with multiple variants for spacing, page size, and orientation.
-
-#### Layer B — checked-in small handcrafted fixtures
-
-Add small, purpose-built PDFs when PDF generation APIs cannot reproduce a behavior such as unusual embedded text order, duplicate layers, or specific rotations. Keep files tiny.
-
-#### Layer C — local/manual real-world corpus
-
-Maintain a documented manual evaluation matrix without necessarily committing copyrighted documents. Categories should include:
-
-- novels/books
-- technical books
-- academic papers
-- conference papers
-- magazines
-- reports/whitepapers
-- annual reports
-- textbooks
-- lecture notes
-- manuals
-- scanned books
-- bilingual documents
-
-For each sampled page, label expected block order, not full copyrighted text.
-
-### Quality metrics
-
-Track:
-
-1. **Block pair ordering accuracy** — percentage of labeled A-before-B relationships satisfied.
-2. **Text conservation** — source informative-character count vs accepted output.
-3. **Duplicate rate** — duplicated semantic markers/blocks.
-4. **Fast-path precision** — simple pages not unnecessarily analyzed.
-5. **Complex-page recall** — known multi-column pages detected.
-6. **Fallback rate** — complex pages that safely reject analyzer output.
-7. **Runtime overhead** — simple and complex digital documents.
-8. **Peak memory** — especially 500-page and OCR cases.
-
-### Initial quality gates
-
-These are implementation targets and can be tightened after the Phase 0 baseline:
-
-- 100% existing regression suite passes.
-- 100% supported deterministic generated fixtures produce exact expected marker order.
-- 0 missing semantic markers on supported fixtures.
-- 0 duplicated semantic markers on supported fixtures.
-- >= 97% pairwise block-order accuracy on manually labeled supported real-world pages.
-- Simple single-column fast-path precision >= 99% on the controlled simple corpus.
-- No increase in OCR invocation for healthy simple digital PDFs.
-- Median 100-page simple-digital parse time overhead <= 10% relative to baseline.
-- Peak memory for the simple-digital benchmark <= 15% above baseline.
-- No retained full-page raster images after page completion.
-
-If performance targets are missed, optimize complexity detection/geometry extraction before weakening correctness gates.
-
-### Adversarial tests
-
-- text boxes physically overlap
-- nearly zero-width gutter
-- three columns with one spanning block
-- centered poem that resembles two lanes
-- dialogue with short left/right-looking lines
-- table-like numbered list
-- wide code block with indentation
-- duplicate invisible text layer
-- page with thousands of tiny fragments
-- huge unbroken token
-- pathological page with many small labels
-- malformed/low-information native text forcing OCR
-- OCR failure on one page in a complex document
-
-### Property/invariant tests
-
-Where deterministic random generation is practical, fuzz geometry and assert:
-
-- analyzer never crashes
-- output deterministic for same seed
-- every accepted block appears once
-- graph always resolves
-- coordinates remain finite/in bounds
-- fallback returns readable original text
-- no Unicode grapheme corruption
-
-### Exit criteria
-
-- Quality gates met.
-- Manual corpus results documented.
-- Performance and memory regressions understood and within budget.
-
-## 17. Phase 10 — Hardening, diagnostics, documentation, and rollout
+## 17. Phase 10 — Validation, adversarial testing, and performance hardening
 
 ### Objective
 
-Make the feature safe to maintain and safe for consuming apps.
+Prove that the analyzer improves complicated PDFs without making ordinary PDFs worse.
+
+### Deterministic matrix
+
+By this phase the synthetic matrix should contain at least 50 layout variants. Prefer 70+ once combinations are included.
+
+For each supported fixture track:
+
+- expected marker order
+- marker coverage
+- duplicate marker count
+- analyzer/fast-path decision
+- layout confidence
+- output determinism
+
+### Real-world corpus
+
+Maintain a small legally redistributable or locally referenced corpus representing:
+
+- public-domain book
+- academic paper
+- technical report
+- magazine/newsletter style page
+- textbook-like page
+- scanned historical document
+- mixed digital/scanned report
+- table-heavy report
+
+Do not commit copyrighted fixtures without redistribution rights. Tests may document external/manual fixture acquisition separately.
+
+### Adversarial / property tests
+
+Generate controlled perturbations:
+
+- +/- small X/Y jitter
+- small font-size variation
+- gutter width changes
+- paragraph indentation changes
+- source fragment ordering shuffled while geometry remains fixed
+- duplicate fragments injected
+- one fragment moved into ambiguous overlap
+
+Invariants:
+
+- every accepted analyzer output contains every unique semantic marker exactly once unless fixture explicitly models duplicates
+- output order is deterministic across repeated parses
+- normalized bounds remain finite/in-range
+- no crash for empty/one-fragment/huge-fragment pages
+- layout analysis never increases text length by an unexplained large factor
+
+### Fuzzing
+
+Add bounded random geometry generation with a fixed seed. The purpose is invariants/crash detection, not exact semantic ordering.
+
+### Performance budgets
+
+Measure against Phase 0 baseline on Apple Silicon CI/local hardware.
+
+Suggested initial gates, tune after real measurements:
+
+- simple digital document: <= 10-15% parser time regression when automatic mode stays on fast path
+- two-column digital document: <= 2x current native extraction time is acceptable if reading-order accuracy materially improves
+- no unbounded memory growth with page count
+- OCR-dominated documents should not materially regress from duplicate rasterization
+
+Use trend/baseline measurements rather than fragile millisecond assertions in normal CI. Performance tests can be explicit/manual if runner variance is high.
+
+### Quality gates
+
+Before enabling automatic mode by default:
+
+- near-perfect marker coverage on supported deterministic fixtures
+- >= 98% pairwise reading-order accuracy on canonical supported fixtures
+- zero known semantic text-loss regressions in ordinary single-column corpus
+- no duplicate inflation from native/OCR overlap
+- fast-path precision high enough that ordinary books almost never enter analyzer unnecessarily
+
+## 18. Phase 11 — Hardening, diagnostics, documentation, and rollout
 
 ### Diagnostics
 
-Provide internal/debug diagnostics capable of showing:
+Keep production diagnostics lightweight and privacy-safe. Do not log document text by default.
 
-- complexity category/confidence
-- fragments and normalized boxes
-- reconstructed lines
-- blocks and roles
-- detected gutters/regions
-- reading-order edges
-- removed low-confidence graph edges
-- analyzer accepted vs fallback decision
+Potential debug diagnostics:
 
-Optionally add a debug overlay in the example macOS app, but keep it out of the core public API unless it proves broadly useful.
+```text
+page index
+fragment count
+line count
+block count
+complexity category/confidence
+column/region count
+reading-order confidence
+fallback reason
+```
+
+Optional developer-only layout dump can contain text/rects when explicitly invoked by tests/demo tooling.
+
+### Demo/manual inspection
+
+Enhance the macOS example with a developer/debug mode only if it proves useful:
+
+- choose fixture/PDF
+- show selected spoken text
+- optionally overlay block rectangles and reading-order numbers
+- compare native order vs analyzed order
+
+Do not turn the package demo into a production document viewer.
 
 ### Documentation
 
 Update README with:
 
-- what layout analysis does
-- fast-path behavior
-- supported layout families
-- remaining limitations
-- interaction with OCR
-- table behavior
-- known unsupported cases such as highly graphical pages or vertical writing if still unresolved
+- what layout analysis improves
+- layouts it supports well
+- unsupported/degraded cases
+- performance tradeoff
+- configuration examples
+- relationship between OCR source selection and layout analysis
 
 ### Rollout strategy
 
-1. Land analyzer internals behind `.never`/test-only selection first if needed.
-2. Enable `.auto` only after Phase 9 gates pass.
-3. Keep explicit `.never` escape hatch.
-4. Keep fallback to legacy selected text permanently; it is a safety property, not temporary migration code.
+1. internal/opt-in analyzer
+2. validate against deterministic + real-world corpus
+3. enable `.automatic` for complex pages only
+4. monitor consuming app regressions
+5. preserve `.never` escape hatch
 
-### Exit criteria
+Never remove fallback behavior merely because synthetic tests pass.
 
-- Documentation matches actual support.
-- Diagnostics are sufficient to investigate future problematic PDFs without adding ad hoc logging.
-- `.auto` is safe as default only after quality gates pass.
+## 19. Proposed file structure
 
-## 18. Detailed algorithm notes
-
-### 18.1 X-axis density and gutter detection
-
-Project block/line horizontal spans onto a normalized X histogram. Candidate gutters are low-density valleys that:
-
-- exceed a minimum normalized width derived from median character/fragment width
-- persist across a meaningful vertical portion of the region
-- separate substantial text mass on both sides
-
-Do not accept a gutter based on a single local whitespace gap.
-
-### 18.2 Vertical slicing
-
-Column structure can change down the page. Detect spanning blocks and major whitespace/structure transitions, then solve columns independently per vertical slice. This is required for academic papers with full-width title/abstract before two-column body text.
-
-### 18.3 Alignment clustering
-
-Cluster left/right edges with adaptive tolerance. Prefer simple deterministic clustering over general-purpose ML. Candidate column lanes should be supported by multiple lines/blocks and meaningful vertical extent.
-
-### 18.4 Writing direction
-
-Default to LTR when text/script evidence is not confidently RTL. For RTL-supported pages, reverse primary-column horizontal order while preserving top-to-bottom order within columns. Horizontal CJK should not receive forced ASCII word spacing. Vertical writing can remain a documented limitation until there is a reliable geometry rule and fixture coverage.
-
-### 18.5 Analyzer-vs-legacy acceptance
-
-Complexity alone is not enough. Accept analyzed output only when:
-
-- reading-order confidence exceeds threshold
-- text conservation passes
-- duplicate/missing-block invariants pass
-- graph ambiguity is below threshold
-
-This two-stage gate is central to protecting existing book quality.
-
-## 19. Expected source organization
-
-Suggested internal organization:
+Likely production files:
 
 ```text
 Sources/PDFKitAudio/Layout/
-  PdfLayoutAnalyzer.swift
   PdfLayoutFragment.swift
+  PdfLayoutGeometry.swift
+  PdfNativeLayoutExtractor.swift
+  PdfOCRLayoutExtractor.swift
+  PdfLayoutComplexityDetector.swift
   PdfLayoutLineBuilder.swift
   PdfLayoutBlockBuilder.swift
-  PdfLayoutComplexityDetector.swift
-  PdfColumnDetector.swift
-  PdfRegionDetector.swift
+  PdfLayoutRegionDetector.swift
   PdfLayoutRoleClassifier.swift
+  PdfLayoutTableDetector.swift
   PdfReadingOrderResolver.swift
-  PdfTableLinearizer.swift
-  PdfLayoutDiagnostics.swift
+  PdfLayoutAnalyzer.swift
+  PdfLayoutConfiguration.swift
 ```
 
-Keep files responsibility-focused. Avoid one giant analyzer type.
-
-Suggested tests:
+Likely tests:
 
 ```text
 Tests/PDFKitAudioTests/Layout/
-  PdfLayoutGeometryTests.swift
-  PdfLayoutComplexityTests.swift
-  PdfLayoutLineBuilderTests.swift
-  PdfLayoutBlockBuilderTests.swift
-  PdfColumnDetectorTests.swift
-  PdfRegionDetectorTests.swift
-  PdfReadingOrderTests.swift
-  PdfLayoutRoleTests.swift
-  PdfTableLinearizerTests.swift
-  PdfLayoutIntegrationTests.swift
-  PdfLayoutPerformanceTests.swift
-  PdfLayoutAdversarialTests.swift
+  LayoutFixtureBuilder.swift
+  LayoutFragmentTests.swift
+  LayoutComplexityDetectorTests.swift
+  LayoutLineBuilderTests.swift
+  LayoutBlockBuilderTests.swift
+  LayoutRegionDetectorTests.swift
+  LayoutRoleClassifierTests.swift
+  LayoutTableDetectorTests.swift
+  LayoutReadingOrderTests.swift
+  LayoutIntegrationTests.swift
+  LayoutAdversarialTests.swift
+  LayoutPerformanceTests.swift
 ```
 
-The exact folder structure can be adjusted to SwiftPM/Xcode conventions, but tests should remain separated by algorithmic responsibility.
+Exact file count is secondary to clear responsibilities. Avoid giant god objects.
 
 ## 20. Definition of done
 
-The layout analyzer is complete only when all of the following are true:
+This project is complete when all of the following are true:
 
-- Existing ordinary-book behavior is preserved.
-- Healthy native PDFs do not incur unnecessary OCR.
-- Supported two-/three-column and mixed-region pages have correct spoken order.
-- Sidebars/captions/footnotes/tables are preserved and ordered conservatively.
-- Text is never silently lost due to layout uncertainty.
-- Low-confidence pages fall back safely.
-- Document-level cleanup remains conservative.
-- Source-page provenance remains exact.
-- Cancellation and memory remain page-bounded.
-- The deterministic fixture corpus covers at least 50 layout variants.
-- Real-world manual evaluation reaches the agreed quality gate.
-- Performance overhead on simple digital books remains small enough that the current lightweight character of PDFKitAudio is preserved.
-- README clearly documents supported and unsupported layouts.
+- normal single-column PDFs retain current behavior/performance characteristics
+- common 2/3-column documents produce correct spoken reading order
+- mixed full-width/column layouts are reconstructed correctly
+- sidebars/captions/footnotes/tables are preserved coherently
+- scanned and native text share equivalent geometry reasoning
+- repeated running matter is removed at least as safely as today
+- low-confidence cases fall back without content loss
+- OCR source-selection semantics remain correct
+- chapters and TTS source-page mappings remain correct
+- cancellation/progress guarantees remain intact
+- deterministic fixture corpus passes
+- real-world validation meets quality gates
+- performance/memory stay within agreed budgets
+- limitations are documented accurately
 
-## 21. Implementation order summary
-
-```text
-Phase 0  Baseline + large fixture corpus + metrics
-Phase 1  Unified native/OCR positioned fragments
-Phase 2  Complexity detector + simple fast-path gate
-Phase 3  Fragment -> line -> block reconstruction
-Phase 4  Columns + spanning regions + vertical segmentation
-Phase 5  Reading-order DAG + confidence + fallback
-Phase 6  Roles + sidebars + captions + footnotes + tables
-Phase 7  Geometry-aware document cleanup
-Phase 8  Parser integration + configuration + cancellation/provenance
-Phase 9  Large real-world/adversarial/performance validation
-Phase 10 Hardening + diagnostics + docs + rollout
-```
-
-Implementation should proceed in this order. Each phase must satisfy its exit criteria and keep all previous tests green before the next phase begins. Do not skip directly to parser integration: the fixture corpus, geometry invariants, complexity precision, and reading-order graph are the safety foundation for the feature.
+The target is not "understand every PDF." The target is a robust, lightweight, native **spoken reading-order engine** that materially improves complicated PDFs without making ordinary books worse.
