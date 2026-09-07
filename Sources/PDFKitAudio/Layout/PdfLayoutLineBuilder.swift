@@ -189,7 +189,11 @@ enum PdfLayoutLineBuilder {
                 estimatedCharacterWidth(lhs),
                 estimatedCharacterWidth(rhs)
             ])
-            let strongGap = max(0.045, medianHeight * 1.45, charWidth * 4.5)
+            let typographyGap = min(0.090, charWidth * 4.5)
+            let strongGap = max(
+                max(0.045, medianHeight * 1.45),
+                typographyGap
+            )
 
             if gap >= strongGap {
                 result.append(current)
@@ -243,14 +247,14 @@ enum PdfLayoutLineBuilder {
             return false
         }
 
-        if previous.text.last?.isWhitespace == true || current.text.first?.isWhitespace == true {
-            return false
-        }
         if isClosingPunctuation(currentCharacter) || isOpeningPunctuation(previousCharacter) {
             return false
         }
         if isCJK(previousCharacter) && isCJK(currentCharacter) {
             return false
+        }
+        if previous.text.last?.isWhitespace == true || current.text.first?.isWhitespace == true {
+            return true
         }
 
         let gap: CGFloat
