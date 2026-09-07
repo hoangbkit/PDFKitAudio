@@ -47,13 +47,14 @@ final class PdfLayoutPhase9CategoryQualityTests: XCTestCase {
             extractCoverImage: false
         ))
         let book = try parser.parse(data: TestPDFBuilder.layoutPDF(fixture))
-        let score = TestLayoutBaselineScorer.score(
-            expectedMarkers: qualityMarkers(for: fixture),
-            in: book.pages.map(\.text).joined(separator: "\n\n")
-        )
-        XCTAssertEqual(score.coverage, 1, "Missing semantic marker in \(fixture.name)")
-        XCTAssertEqual(score.pairwiseAccuracy, 1, "Wrong semantic order in \(fixture.name)")
-        XCTAssertEqual(score.duplicateMarkerCount, 0, "Duplicated semantic marker in \(fixture.name)")
+        let combined = book.pages.map(\.text).joined(separator: "\n\n")
+        let expected = qualityMarkers(for: fixture)
+        let actual = TestLayoutBaselineScorer.orderedMarkers(expectedMarkers: expected, in: combined)
+        let score = TestLayoutBaselineScorer.score(expectedMarkers: expected, in: combined)
+        let detail = "\(fixture.name) expected=\(expected) actual=\(actual) text=\(combined)"
+        XCTAssertEqual(score.coverage, 1, "Missing semantic marker: \(detail)")
+        XCTAssertEqual(score.pairwiseAccuracy, 1, "Wrong semantic order: \(detail)")
+        XCTAssertEqual(score.duplicateMarkerCount, 0, "Duplicated semantic marker: \(detail)")
     }
 
     private func qualityMarkers(for fixture: TestLayoutFixture) -> [String] {
