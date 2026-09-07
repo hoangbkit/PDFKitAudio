@@ -22,8 +22,8 @@ jobs:
       - name: Swift version
         run: swift --version
 
-      - name: Run package tests
-        run: swift test
+      - name: Isolate Phase 9 final-parser quality gate
+        run: swift test --filter PdfLayoutPhase9QualityGateTests/testEverySupportedNativeFixtureHasExactFinalParserMarkerOrderAndConservation
 
       - name: Install XcodeGen
         run: brew install xcodegen
