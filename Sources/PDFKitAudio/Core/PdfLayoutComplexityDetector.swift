@@ -17,9 +17,11 @@ struct PdfLayoutComplexityFeatures: Equatable {
     let leftEdgeClusterCount: Int
     let dominantLaneCount: Int
     let sideBySideRowCount: Int
+    let alignedMultiItemRowCount: Int
     let maximumItemsPerRow: Int
     let singleItemRowCount: Int
     let longestInteriorGutter: CGFloat
+    let dominantLaneSeparation: CGFloat
     let medianFragmentWidth: CGFloat
     let medianFragmentHeight: CGFloat
     let shortTextRatio: Double
@@ -65,9 +67,11 @@ enum PdfLayoutComplexityDetector {
                 leftEdgeClusterCount: 0,
                 dominantLaneCount: 0,
                 sideBySideRowCount: 0,
+                alignedMultiItemRowCount: 0,
                 maximumItemsPerRow: 0,
                 singleItemRowCount: 0,
                 longestInteriorGutter: 0,
+                dominantLaneSeparation: 0,
                 medianFragmentWidth: 0,
                 medianFragmentHeight: 0,
                 shortTextRatio: 0,
@@ -94,7 +98,11 @@ enum PdfLayoutComplexityDetector {
         let dominantThreshold = max(2, Int(ceil(Double(valid.count) * 0.18)))
         let dominantClusters = leftClusters.filter { $0.indices.count >= dominantThreshold }
         let rowStats = rowStatistics(rows: rows, fragments: valid)
-        let gutter = longestInteriorGutter(fragments: valid)
+        let pageWideGutter = longestInteriorGutter(fragments: valid)
+        let laneSeparation = dominantLaneSeparation(
+            fragments: valid,
+            clusters: dominantClusters
+        )
         let shortTextRatio = ratio(valid) { fragment in
             semanticCharacterCount(fragment.text) <= 22
         }
@@ -107,7 +115,7 @@ enum PdfLayoutComplexityDetector {
             fragments: valid,
             rows: rows,
             rowStats: rowStats,
-            dominantLaneCount: dominantClusters.count,
+            dominantClusters: dominantClusters,
             medianFragmentWidth: medianWidth
         )
 
@@ -116,9 +124,11 @@ enum PdfLayoutComplexityDetector {
             leftEdgeClusterCount: leftClusters.count,
             dominantLaneCount: dominantClusters.count,
             sideBySideRowCount: rowStats.sideBySideRowCount,
+            alignedMultiItemRowCount: rowStats.alignedMultiItemRowCount,
             maximumItemsPerRow: rowStats.maximumItemsPerRow,
             singleItemRowCount: rowStats.singleItemRowCount,
-            longestInteriorGutter: gutter,
+            longestInteriorGutter: pageWideGutter,
+            dominantLaneSeparation: laneSeparation,
             medianFragmentWidth: medianWidth,
             medianFragmentHeight: medianHeight,
             shortTextRatio: shortTextRatio,
@@ -126,18 +136,29 @@ enum PdfLayoutComplexityDetector {
             mixedVerticalRegionsDetected: mixedRegions
         )
 
-        let tableEvidence = rowStats.sideBySideRowCount >= 2
-            && rowStats.maximumItemsPerRow >= 2
-            && shortTextRatio >= 0.72
+        // Table evidence is intentionally stronger than generic multi-lane
+        // evidence. Two-column prose may align by row, so a 2-lane page needs
+        // short/compact cell-like content. Three-or-more lanes can also qualify
+        // when repeated rows are tightly packed, which catches multi-line cells
+        // whose text boxes consume most of their column width.
+        let compactCellRows = rowStats.alignedMultiItemRowCount >= 2
             && dominantClusters.count >= 2
-            && gutter >= 0.025
+            && shortTextRatio >= 0.72
+            && medianWidth <= 0.22
+        let denseGridRows = rowStats.tightAlignedRowCount >= 2
+            && rowStats.maximumItemsPerRow >= 3
+            && dominantClusters.count >= 3
+        let explicitMultilineCells = rowStats.alignedMultiItemRowCount >= 2
+            && rowStats.maximumItemsPerRow >= 3
+            && ratio(valid) { $0.text.contains("\n") } >= 0.50
+        let tableEvidence = compactCellRows || denseGridRows || explicitMultilineCells
 
         if tableEvidence {
             let confidence = clampedConfidence(
-                0.72
-                    + min(0.12, Double(rowStats.sideBySideRowCount) * 0.025)
+                0.74
+                    + min(0.10, Double(rowStats.alignedMultiItemRowCount) * 0.02)
                     + (rowStats.maximumItemsPerRow >= 3 ? 0.08 : 0)
-                    + (shortTextRatio >= 0.90 ? 0.05 : 0)
+                    + (shortTextRatio >= 0.90 ? 0.04 : 0)
             )
             return assessment(
                 .likelyTableHeavy,
@@ -145,22 +166,26 @@ enum PdfLayoutComplexityDetector {
                 quality: quality,
                 features: features,
                 reasons: [
-                    "Repeated aligned multi-item rows were detected.",
-                    "Most positioned fragments are short cell-like strings."
+                    "Repeated aligned cell-like rows were detected.",
+                    "Row density/compactness is stronger than ordinary column evidence."
                 ]
             )
         }
 
-        let multiColumnEvidence = dominantClusters.count >= 2
-            && rowStats.sideBySideRowCount >= 2
-            && gutter >= 0.035
+        // Mixed-region detection deliberately does not use the page-wide gutter:
+        // a full-width title/caption/conclusion legitimately crosses that gutter.
+        // Instead, it relies on recurring lane separation plus row transitions.
+        let mixedRegionEvidence = mixedRegions
+            && dominantClusters.count >= 2
+            && rowStats.alignedMultiItemRowCount >= 2
+            && laneSeparation >= 0.015
 
-        if multiColumnEvidence && mixedRegions {
+        if mixedRegionEvidence {
             let confidence = clampedConfidence(
-                0.72
-                    + min(0.12, Double(rowStats.sideBySideRowCount) * 0.025)
+                0.74
+                    + min(0.10, Double(rowStats.alignedMultiItemRowCount) * 0.02)
                     + min(0.08, Double(dominantClusters.count - 1) * 0.04)
-                    + min(0.06, Double(gutter) * 0.30)
+                    + min(0.06, Double(laneSeparation) * 0.35)
             )
             return assessment(
                 .mixedRegions,
@@ -168,18 +193,28 @@ enum PdfLayoutComplexityDetector {
                 quality: quality,
                 features: features,
                 reasons: [
-                    "Multiple stable horizontal lanes were detected.",
-                    "The number or width/style of lanes changes by vertical region."
+                    "Multiple recurring horizontal lanes were detected.",
+                    "Single-row/spanning structure changes the lane model by vertical region."
                 ]
             )
         }
 
+        // Persistent lane separation is sufficient even when left/right lines do
+        // not share a baseline (for example one column starts lower). Requiring
+        // side-by-side rows alone would miss those layouts.
+        let multiColumnEvidence = dominantClusters.count >= 2
+            && laneSeparation >= 0.025
+            && (
+                rowStats.alignedMultiItemRowCount >= 2
+                    || dominantClusters.allSatisfy { $0.indices.count >= 2 }
+            )
+
         if multiColumnEvidence {
             let confidence = clampedConfidence(
                 0.68
-                    + min(0.14, Double(rowStats.sideBySideRowCount) * 0.03)
+                    + min(0.14, Double(rowStats.alignedMultiItemRowCount) * 0.025)
                     + min(0.10, Double(dominantClusters.count - 1) * 0.05)
-                    + min(0.06, Double(gutter) * 0.30)
+                    + min(0.08, Double(laneSeparation) * 0.40)
             )
             return assessment(
                 .likelyMultiColumn,
@@ -187,8 +222,8 @@ enum PdfLayoutComplexityDetector {
                 quality: quality,
                 features: features,
                 reasons: [
-                    "Two or more stable left-edge lanes recur across rows.",
-                    "A persistent interior horizontal gutter separates those lanes."
+                    "Two or more stable left-edge lanes recur on the page.",
+                    "Typical lane extents leave a persistent interior separation."
                 ]
             )
         }
@@ -208,9 +243,9 @@ enum PdfLayoutComplexityDetector {
             )
         }
 
-        // A lone separated pair is not enough evidence to disturb the fast path.
-        // This protects sparse pages, poems, dialogue, transformed pages, and
-        // numbered lists from being over-classified.
+        // A lone separated pair or overlapping indentation pattern is not enough
+        // evidence to disturb the fast path. This protects sparse pages, poems,
+        // dialogue, transformed pages, indented quotes, and numbered lists.
         if dominantClusters.count <= 1 && rowStats.sideBySideRowCount <= 1 {
             let confidence = clampedConfidence(
                 leftClusters.count <= 2 ? 0.94 : 0.86
@@ -277,6 +312,8 @@ enum PdfLayoutComplexityDetector {
 
     private struct RowStatistics {
         let sideBySideRowCount: Int
+        let alignedMultiItemRowCount: Int
+        let tightAlignedRowCount: Int
         let maximumItemsPerRow: Int
         let singleItemRowCount: Int
         let sideBySideRowIndices: Set<Int>
@@ -331,6 +368,8 @@ enum PdfLayoutComplexityDetector {
     ) -> RowStatistics {
         var sideBySideRows: Set<Int> = []
         var singleRows: Set<Int> = []
+        var alignedMultiItemRows = 0
+        var tightAlignedRows = 0
         var maximumItems = 0
 
         for (rowIndex, row) in rows.enumerated() {
@@ -338,20 +377,30 @@ enum PdfLayoutComplexityDetector {
             let ordered = row.indices.sorted {
                 fragments[$0].rect.minX < fragments[$1].rect.minX
             }
-            var hasMeaningfulGap = false
+
             if ordered.count >= 2 {
+                alignedMultiItemRows += 1
+                var hasMeaningfulGap = false
+                var positiveGaps: [CGFloat] = []
                 for pairIndex in 0..<(ordered.count - 1) {
                     let lhs = fragments[ordered[pairIndex]].rect
                     let rhs = fragments[ordered[pairIndex + 1]].rect
-                    if rhs.minX - lhs.maxX >= 0.035 {
+                    let gap = rhs.minX - lhs.maxX
+                    if gap > 0 { positiveGaps.append(gap) }
+                    if gap >= 0.035 {
                         hasMeaningfulGap = true
-                        break
                     }
                 }
-            }
 
-            if hasMeaningfulGap {
-                sideBySideRows.insert(rowIndex)
+                if hasMeaningfulGap {
+                    sideBySideRows.insert(rowIndex)
+                }
+
+                if ordered.count >= 3,
+                   !positiveGaps.isEmpty,
+                   median(positiveGaps) <= 0.030 {
+                    tightAlignedRows += 1
+                }
             } else if row.indices.count == 1 {
                 singleRows.insert(rowIndex)
             }
@@ -359,6 +408,8 @@ enum PdfLayoutComplexityDetector {
 
         return RowStatistics(
             sideBySideRowCount: sideBySideRows.count,
+            alignedMultiItemRowCount: alignedMultiItemRows,
+            tightAlignedRowCount: tightAlignedRows,
             maximumItemsPerRow: maximumItems,
             singleItemRowCount: singleRows.count,
             sideBySideRowIndices: sideBySideRows,
@@ -370,10 +421,10 @@ enum PdfLayoutComplexityDetector {
         fragments: [PdfLayoutFragment],
         rows: [RowCluster],
         rowStats: RowStatistics,
-        dominantLaneCount: Int,
+        dominantClusters: [EdgeCluster],
         medianFragmentWidth: CGFloat
     ) -> Bool {
-        guard dominantLaneCount >= 2,
+        guard dominantClusters.count >= 2,
               !rowStats.sideBySideRowIndices.isEmpty,
               !rowStats.singleItemRowIndices.isEmpty else {
             return false
@@ -401,12 +452,20 @@ enum PdfLayoutComplexityDetector {
             if rowIndex > lastMulti { hasSingleAfter = true }
             if rowIndex > firstMulti && rowIndex < lastMulti { hasSingleInside = true }
 
+            // 1.30 is intentionally only used after strong recurring multi-lane
+            // evidence. It captures a conclusion/summary whose glyph bounds are
+            // wider than a column but do not span the full declared text box.
             let isWide = medianFragmentWidth > 0
-                && fragment.rect.width >= medianFragmentWidth * 1.45
+                && fragment.rect.width >= medianFragmentWidth * 1.30
             let isEmphasized = (fragment.style?.isBold == true)
                 || (medianFontSize > 0
                     && (fragment.style?.fontSize ?? 0) >= medianFontSize * 1.22)
-            if isWide || isEmphasized {
+            let bridgesLaneGap = fragmentBridgesDominantLaneGap(
+                fragment.rect,
+                fragments: fragments,
+                clusters: dominantClusters
+            )
+            if isWide || isEmphasized || bridgesLaneGap {
                 hasStrongSingleton = true
             }
         }
@@ -441,6 +500,52 @@ enum PdfLayoutComplexityDetector {
                 if horizontallySeparated && verticallyOverlapsBody {
                     return true
                 }
+            }
+        }
+        return false
+    }
+
+    /// Measures separation using only recurring lane members, so a one-off
+    /// full-width heading/caption does not erase an otherwise strong gutter.
+    private static func dominantLaneSeparation(
+        fragments: [PdfLayoutFragment],
+        clusters: [EdgeCluster]
+    ) -> CGFloat {
+        guard clusters.count >= 2 else { return 0 }
+        let ordered = clusters.sorted { $0.center < $1.center }
+        var maximumSeparation: CGFloat = 0
+
+        for index in 0..<(ordered.count - 1) {
+            let lhs = ordered[index]
+            let rhs = ordered[index + 1]
+            let lhsRight = median(lhs.indices.map { fragments[$0].rect.maxX })
+            let rhsLeft = median(rhs.indices.map { fragments[$0].rect.minX })
+            maximumSeparation = max(maximumSeparation, rhsLeft - lhsRight)
+        }
+
+        return max(0, maximumSeparation)
+    }
+
+    private static func fragmentBridgesDominantLaneGap(
+        _ rect: CGRect,
+        fragments: [PdfLayoutFragment],
+        clusters: [EdgeCluster]
+    ) -> Bool {
+        guard clusters.count >= 2 else { return false }
+        let ordered = clusters.sorted { $0.center < $1.center }
+
+        for index in 0..<(ordered.count - 1) {
+            let lhs = ordered[index]
+            let rhs = ordered[index + 1]
+            let lhsRight = median(lhs.indices.map { fragments[$0].rect.maxX })
+            let rhsLeft = median(rhs.indices.map { fragments[$0].rect.minX })
+            let gap = rhsLeft - lhsRight
+            guard gap >= 0.015 else { continue }
+
+            let innerStart = lhsRight + gap * 0.35
+            let innerEnd = rhsLeft - gap * 0.35
+            if rect.minX <= innerStart && rect.maxX >= innerEnd {
+                return true
             }
         }
         return false
