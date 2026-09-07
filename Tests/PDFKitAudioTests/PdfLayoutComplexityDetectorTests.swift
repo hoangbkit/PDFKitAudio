@@ -80,7 +80,7 @@ final class PdfLayoutComplexityDetectorTests: XCTestCase {
             let assessment = assessFixture(named: name)
             XCTAssertTrue(assessment.shouldAnalyze, name)
             XCTAssertEqual(assessment.complexity, .likelyTableHeavy, name)
-            XCTAssertGreaterThanOrEqual(assessment.features.sideBySideRowCount, 2, name)
+            XCTAssertGreaterThanOrEqual(assessment.features.alignedMultiItemRowCount, 2, name)
         }
     }
 
