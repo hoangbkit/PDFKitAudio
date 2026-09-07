@@ -11,11 +11,17 @@ public final class PdfParser: Sendable {
     typealias OCRRecognizer = @Sendable (PDFPage, PdfOCRConfiguration) -> PdfOCREngine.OCRResult?
     public typealias ProgressHandler = @Sendable (PdfParseProgress) -> Void
 
+    private struct ExtractedPage {
+        let content: PdfPageContent
+        let layoutFingerprints: [PdfDocumentLayoutFingerprint]
+    }
+
     public let configuration: PdfParserConfiguration
 
     /// Compatibility aliases for callers that previously read individual parser
     /// settings directly. New code should prefer `configuration`.
     public var ocrConfiguration: PdfOCRConfiguration { configuration.ocr }
+    public var layoutConfiguration: PdfLayoutConfiguration { configuration.layout }
     public var cleanupConfiguration: PdfCleanupConfiguration { configuration.cleanup }
     public var extractCoverImage: Bool { configuration.extractCoverImage }
     public var retainNativeText: Bool { configuration.retainNativeText }
@@ -72,10 +78,12 @@ public final class PdfParser: Sendable {
         cleanupConfiguration: PdfCleanupConfiguration = .audiobookDefault,
         extractCoverImage: Bool = true,
         retainNativeText: Bool = true,
+        layoutConfiguration: PdfLayoutConfiguration = PdfLayoutConfiguration(),
         ocrRecognizer: @escaping OCRRecognizer
     ) {
         self.configuration = PdfParserConfiguration(
             ocr: ocrConfiguration,
+            layout: layoutConfiguration,
             cleanup: cleanupConfiguration,
             extractCoverImage: extractCoverImage,
             retainNativeText: retainNativeText
@@ -206,17 +214,19 @@ public final class PdfParser: Sendable {
         control.report(stage: .extracting, completedPages: 0, totalPages: pageCount)
         var pages: [PdfPageContent] = []
         pages.reserveCapacity(pageCount)
+        var layoutFingerprints: [PdfDocumentLayoutFingerprint] = []
 
         for pageIndex in 0..<pageCount {
             try control.checkpoint()
-            let content = try autoreleasepool {
+            let extracted = try autoreleasepool {
                 try extractPage(
                     document.page(at: pageIndex),
                     pageIndex: pageIndex,
                     control: control
                 )
             }
-            pages.append(content)
+            pages.append(extracted.content)
+            layoutFingerprints.append(contentsOf: extracted.layoutFingerprints)
             control.report(
                 stage: .extracting,
                 completedPages: pageIndex + 1,
@@ -228,7 +238,8 @@ public final class PdfParser: Sendable {
         control.report(stage: .cleaning, completedPages: pageCount, totalPages: pageCount)
         pages = PdfDocumentTextCleaner.clean(
             pages,
-            configuration: cleanupConfiguration
+            configuration: cleanupConfiguration,
+            layoutFingerprints: layoutFingerprints
         )
 
         // Scanned-document metadata needs the raw native extraction signal. Compute
@@ -291,15 +302,18 @@ public final class PdfParser: Sendable {
         _ page: PDFPage?,
         pageIndex: Int,
         control: ParseControl
-    ) throws -> PdfPageContent {
+    ) throws -> ExtractedPage {
         try control.checkpoint()
         guard let page else {
-            return PdfPageContent(
-                pageIndex: pageIndex,
-                nativeText: "",
-                text: "",
-                extractionSource: .empty,
-                confidence: 0
+            return ExtractedPage(
+                content: PdfPageContent(
+                    pageIndex: pageIndex,
+                    nativeText: "",
+                    text: "",
+                    extractionSource: .empty,
+                    confidence: 0
+                ),
+                layoutFingerprints: []
             )
         }
 
@@ -307,6 +321,7 @@ public final class PdfParser: Sendable {
         var selectedText = nativeText
         var source: PdfExtractionSource = nativeText.isEmpty ? .empty : .native
         var confidence = nativeText.isEmpty ? 0.0 : 1.0
+        var selectedOCRResult: PdfOCREngine.OCRResult?
 
         if PdfOCRPolicy.shouldRunOCR(
             nativeText: nativeText,
@@ -329,7 +344,46 @@ public final class PdfParser: Sendable {
                 selectedText = ocrResult.text
                 source = .ocr
                 confidence = ocrResult.confidence
+                selectedOCRResult = ocrResult
             }
+        }
+
+        var layoutFingerprints: [PdfDocumentLayoutFingerprint] = []
+        if layoutConfiguration.mode != .never, source != .empty {
+            // Geometry extraction is page-local and may be more expensive than
+            // the legacy selected-text path. Keep cancellation boundaries around
+            // both extraction and the analyzer itself without adding a new public
+            // progress stage.
+            try control.checkpoint()
+            let fragments: [PdfLayoutFragment]
+            switch source {
+            case .native:
+                fragments = PdfPositionedTextExtractor.nativeFragments(page: page)
+            case .ocr:
+                if let selectedOCRResult {
+                    fragments = PdfPositionedTextExtractor.ocrFragments(from: selectedOCRResult)
+                } else {
+                    fragments = []
+                }
+            case .empty:
+                fragments = []
+            }
+            try control.checkpoint()
+
+            if let analyzed = try PdfLayoutAnalyzer.analyze(
+                fragments: fragments,
+                nativeText: nativeText,
+                nativeTextThreshold: ocrConfiguration.nativeTextThreshold,
+                pageIndex: pageIndex,
+                mode: layoutConfiguration.mode,
+                checkpoint: {
+                    try control.checkpoint()
+                }
+            ) {
+                selectedText = analyzed.text
+                layoutFingerprints = analyzed.fingerprints
+            }
+            try control.checkpoint()
         }
 
         let cleanedText = PdfTextCleaner.cleanPage(
@@ -339,14 +393,18 @@ public final class PdfParser: Sendable {
         if cleanedText.isEmpty {
             source = .empty
             confidence = 0
+            layoutFingerprints = []
         }
 
-        return PdfPageContent(
-            pageIndex: pageIndex,
-            nativeText: nativeText,
-            text: cleanedText,
-            extractionSource: source,
-            confidence: confidence
+        return ExtractedPage(
+            content: PdfPageContent(
+                pageIndex: pageIndex,
+                nativeText: nativeText,
+                text: cleanedText,
+                extractionSource: source,
+                confidence: confidence
+            ),
+            layoutFingerprints: layoutFingerprints
         )
     }
 
