@@ -32,6 +32,10 @@ example-build: example-generate
 		build
 
 example-build-ci: example-generate
+	@if grep -Eq 'PDFKitAudioDemo\.entitlements in (Sources|Resources)' "$(XCODEPROJ)/project.pbxproj"; then \
+		echo "Entitlements must not be added to Sources or Resources build phases."; \
+		exit 1; \
+	fi
 	xcodebuild \
 		-scheme $(SCHEME) \
 		-project $(XCODEPROJ) \
