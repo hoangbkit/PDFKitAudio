@@ -1,3 +1,4 @@
+import Foundation
 import PDFKit
 import Vision
 import XCTest
@@ -57,11 +58,11 @@ final class PdfOCRTests: XCTestCase {
     }
 
     func testNeverModeDoesNotInvokeOCRRecognizer() throws {
-        var attempts = 0
+        let attempts = LockedCounter()
         let parser = PdfParser(
             ocrConfiguration: PdfOCRConfiguration(mode: .never),
             ocrRecognizer: { _, _ in
-                attempts += 1
+                attempts.increment()
                 return PdfOCREngine.OCRResult(text: "Should not run", confidence: 1)
             }
         )
@@ -69,16 +70,16 @@ final class PdfOCRTests: XCTestCase {
 
         let book = try parser.parse(data: data)
 
-        XCTAssertEqual(attempts, 0)
+        XCTAssertEqual(attempts.value, 0)
         XCTAssertEqual(book.pages.first?.extractionSource, .empty)
     }
 
     func testAutoModeDoesNotInvokeOCRForStrongNativePage() throws {
-        var attempts = 0
+        let attempts = LockedCounter()
         let parser = PdfParser(
             ocrConfiguration: PdfOCRConfiguration(mode: .auto, nativeTextThreshold: 60),
             ocrRecognizer: { _, _ in
-                attempts += 1
+                attempts.increment()
                 return PdfOCREngine.OCRResult(text: "Unexpected OCR", confidence: 1)
             }
         )
@@ -88,17 +89,17 @@ final class PdfOCRTests: XCTestCase {
 
         let book = try parser.parse(data: data)
 
-        XCTAssertEqual(attempts, 0)
+        XCTAssertEqual(attempts.value, 0)
         XCTAssertEqual(book.pages.first?.extractionSource, .native)
     }
 
     func testAlwaysModeAttemptsOCRButKeepsBetterNativeText() throws {
-        var attempts = 0
+        let attempts = LockedCounter()
         let nativeText = "This is strong native text that should remain selected even when always mode asks the OCR engine to evaluate the page."
         let parser = PdfParser(
             ocrConfiguration: PdfOCRConfiguration(mode: .always),
             ocrRecognizer: { _, _ in
-                attempts += 1
+                attempts.increment()
                 return PdfOCREngine.OCRResult(text: "bad", confidence: 0.05)
             }
         )
@@ -106,7 +107,7 @@ final class PdfOCRTests: XCTestCase {
 
         let book = try parser.parse(data: data)
 
-        XCTAssertEqual(attempts, 1)
+        XCTAssertEqual(attempts.value, 1)
         XCTAssertEqual(book.pages.first?.extractionSource, .native)
         XCTAssertTrue(book.pages.first?.text.contains("strong native text") ?? false)
     }
@@ -148,5 +149,22 @@ final class PdfOCRTests: XCTestCase {
 
         XCTAssertEqual(book.pages.first?.extractionSource, .ocr)
         XCTAssertTrue(book.pages.first?.text.localizedCaseInsensitiveContains("Bonjour") ?? false)
+    }
+}
+
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = 0
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func increment() {
+        lock.lock()
+        storage += 1
+        lock.unlock()
     }
 }
