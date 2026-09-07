@@ -126,6 +126,6 @@ This PR started as a planning-only change and is now implementing the approved p
 - Added deterministic regressions for headers outside legacy edge windows, inconsistent geometry, horizontally moving page numbers, legitimate years, semantic chapter-heading anchors, two-occurrence semantic edge text, documents shorter than four pages, mixed analyzed/fast-path documents, alternating headers, and repeated-run determinism.
 - Added real generated PDFKit integration for identical and alternating running headers through native positioned extraction → line/block reconstruction → regions/roles → compact fingerprints → document cleanup; alternating recurrence is validated on eight pages so the production evidence threshold is not weakened for the test.
 - Existing document-cleanup/parser behavior remains source-compatible because `layoutFingerprints` defaults to empty; parser production wiring remains intentionally deferred to Phase 8.
-- The Phase 7 gate passed the full SwiftPM suite and generated macOS example-app build on macOS 14.
+- The Phase 7 code/test head passed the full SwiftPM suite and generated macOS example-app build on macOS 14; the final documentation-head CI is required to remain green before Phase 8 begins.
 
 Each phase is marked complete only after its exit criteria are satisfied and CI is green.
