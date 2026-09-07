@@ -30,7 +30,7 @@ public struct PdfOCRConfiguration: Hashable, Sendable {
 
     public init(
         mode: OCROptions = .auto,
-        nativeTextThreshold: Int = 60,
+        nativeTextThreshold: Int = 20,
         recognitionLanguages: [String] = [],
         automaticallyDetectsLanguage: Bool = true,
         recognitionLevel: PdfOCRRecognitionLevel = .accurate,
