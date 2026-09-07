@@ -156,7 +156,7 @@ enum PdfPositionedTextExtractor {
                 let substitution = previous[rightIndex] + (leftCharacter == rightCharacter ? 0 : 1)
                 let insertion = current[rightIndex] + 1
                 let deletion = previous[rightIndex + 1] + 1
-                current[rightIndex + 1] = min(substitution, insertion, deletion)
+                current[rightIndex + 1] = Swift.min(substitution, Swift.min(insertion, deletion))
             }
             swap(&previous, &current)
         }
