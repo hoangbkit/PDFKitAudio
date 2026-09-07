@@ -2,19 +2,22 @@ import Foundation
 
 /// Small document-level metadata retained after page-local layout analysis.
 ///
-/// Phase 7 intentionally does not retain full fragment/line/block graphs across
-/// the whole document. These fingerprints are sufficient for recurring-matter
-/// cleanup while keeping memory bounded and parser integration decoupled until
-/// Phase 8.
+/// Phase 7 intentionally does not retain full fragment/line/block graphs or raw
+/// block text across the whole document. Normalized line signatures are enough
+/// to match back to canonical page text during recurring-matter cleanup while
+/// keeping memory bounded and parser integration decoupled until Phase 8.
 struct PdfDocumentLayoutFingerprint: Equatable {
     let pageIndex: Int
     let blockID: Int
-    let text: String
-    let textSignature: String
+    let lineSignatures: [String]
     let rect: CGRect
     let role: PdfLayoutRole
     let roleConfidence: Double
     let styleBucket: PdfDocumentLayoutStyleBucket?
+
+    var textSignature: String {
+        lineSignatures.joined(separator: "\n")
+    }
 
     init(
         pageIndex: Int,
@@ -27,8 +30,10 @@ struct PdfDocumentLayoutFingerprint: Equatable {
     ) {
         self.pageIndex = pageIndex
         self.blockID = blockID
-        self.text = text
-        self.textSignature = PdfDocumentTextSignature.normalize(text)
+        self.lineSignatures = text
+            .components(separatedBy: "\n")
+            .map(PdfDocumentTextSignature.normalize)
+            .filter { !$0.isEmpty }
         self.rect = rect
         self.role = role
         self.roleConfidence = min(1, max(0, roleConfidence))
