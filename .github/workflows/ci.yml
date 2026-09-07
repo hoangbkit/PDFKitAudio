@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   test:
-    name: Phase 9 diagnostics (macOS 14)
+    name: SwiftPM + example (macOS 14)
     runs-on: macos-14
     timeout-minutes: 20
 
@@ -22,5 +22,11 @@ jobs:
       - name: Swift version
         run: swift --version
 
-      - name: Run Phase 9 root-cause diagnostics
-        run: swift test --filter PdfLayoutPhase9CategoryQualityTests/testPhase9RootCauseDiagnostics
+      - name: Run package tests
+        run: swift test
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Build generated example app
+        run: make example-build-ci
