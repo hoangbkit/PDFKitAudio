@@ -47,6 +47,10 @@ enum PdfLayoutBlockBuilder {
 
         var lastLine: PdfLayoutLine { lines[lines.count - 1] }
         var minimumSourceOrder: Int { lines.map(\.sourceOrder).min() ?? 0 }
+        var startsWithListItem: Bool {
+            guard let first = lines.first else { return false }
+            return PdfLayoutBlockBuilder.beginsListItem(first.text)
+        }
 
         mutating func append(_ line: PdfLayoutLine) {
             lines.append(line)
@@ -67,6 +71,7 @@ enum PdfLayoutBlockBuilder {
             guard canMerge(
                 previous: previous,
                 current: line,
+                blockStartsWithListItem: draft.startsWithListItem,
                 pageMedianHeight: pageMedianHeight,
                 pageMedianFontSize: pageMedianFontSize
             ) else { continue }
@@ -87,6 +92,7 @@ enum PdfLayoutBlockBuilder {
     private static func canMerge(
         previous: PdfLayoutLine,
         current: PdfLayoutLine,
+        blockStartsWithListItem: Bool,
         pageMedianHeight: CGFloat,
         pageMedianFontSize: CGFloat
     ) -> Bool {
@@ -138,9 +144,9 @@ enum PdfLayoutBlockBuilder {
             return false
         }
 
-        // Each explicit list item starts a separate block; wrapped continuation
-        // lines without their own marker remain mergeable with the item above.
-        if beginsListItem(previous.text) && beginsListItem(current.text) {
+        // Each explicit list item starts a separate block. A continuation line
+        // can still merge with the list block above, but the next marker cannot.
+        if blockStartsWithListItem && beginsListItem(current.text) {
             return false
         }
 
