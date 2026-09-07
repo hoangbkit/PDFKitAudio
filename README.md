@@ -6,9 +6,67 @@ PDFKitAudio is a standalone, **macOS-only** Swift package. It is designed for de
 
 The parser uses PDFKit native text first and selectively falls back to Vision OCR. It intentionally avoids heavyweight document-understanding models.
 
-## Quick start
+> [!WARNING]
+> **Public, but not maintained as a full OSS project.** This repository is public so the code can be reused, inspected, and referenced, but it is primarily maintained for the author's own projects. There is no guarantee of community support, issue/PR response times, semantic-versioning stability, or long-term API compatibility. If you depend on it in another project, pin a known-good commit or tag and review upgrades before adopting them.
 
-For new code, configure the parser through `PdfParserConfiguration`:
+## Installation
+
+### Xcode
+
+In Xcode, choose **File → Add Package Dependencies…** and add:
+
+```text
+https://github.com/hoangbkit/PDFKitAudio.git
+```
+
+Add the `PDFKitAudio` product to your macOS target.
+
+### Package.swift
+
+You can also add the package directly to a SwiftPM manifest. Until you choose a release/tag to pin, a branch dependency is the simplest way to follow the repository:
+
+```swift
+let package = Package(
+    dependencies: [
+        .package(
+            url: "https://github.com/hoangbkit/PDFKitAudio.git",
+            branch: "master"
+        )
+    ],
+    targets: [
+        .target(
+            name: "YourTarget",
+            dependencies: ["PDFKitAudio"]
+        )
+    ]
+)
+```
+
+For production use, prefer pinning a known-good tag or commit instead of automatically following `master`.
+
+## Basic usage
+
+Import the package and parse a PDF URL:
+
+```swift
+import PDFKitAudio
+
+let parser = PdfParser()
+let book = try await parser.parseAsync(at: pdfURL)
+
+print(book.metadata.title ?? "Untitled")
+print("Pages: \(book.pages.count)")
+print("Chapters: \(book.chapters.count)")
+
+for chapter in book.chapters {
+    print(chapter.title)
+    print(chapter.plainText)
+}
+```
+
+`PdfBook.pages` is the canonical ordered page output. Each `PdfPageContent` records its source page index and whether the selected text came from native PDF text, Vision OCR, or an empty page.
+
+For new code that needs explicit behavior, configure the parser through `PdfParserConfiguration`:
 
 ```swift
 let parser = PdfParser(configuration: PdfParserConfiguration(
@@ -18,7 +76,7 @@ let parser = PdfParser(configuration: PdfParserConfiguration(
     retainNativeText: false
 ))
 
-let book = try await parser.parseAsync(at: url)
+let book = try await parser.parseAsync(at: pdfURL)
 ```
 
 `PdfParser()`, `PdfParser(ocrMode:)`, the OCR-specific initializer, and the synchronous `parse(at:)` / `parse(data:)` methods remain available for existing and simple callers.
@@ -27,7 +85,7 @@ let book = try await parser.parseAsync(at: url)
 
 ## OCR
 
-Default parsing keeps healthy digital PDFs on the native fast path. Pages with missing, short, or suspicious native text become OCR candidates.
+Default parsing keeps healthy digital PDFs on the native fast path. Pages with missing, very short, or suspicious native text become OCR candidates.
 
 Vision automatic language detection is enabled by default; PDFKitAudio does not hard-code English. Callers that need tighter control can provide explicit recognition languages and behavior:
 
@@ -41,6 +99,12 @@ let parser = PdfParser(configuration: PdfParserConfiguration(
     )
 ))
 ```
+
+OCR modes are:
+
+- `.auto` — use PDFKit first and run Vision only for pages whose native extraction is missing or looks unreliable.
+- `.never` — never invoke Vision OCR.
+- `.always` — attempt Vision OCR on every page, while still keeping native text when it is the better result.
 
 Running OCR does not automatically replace native PDF text. PDFKitAudio keeps the native result when OCR is empty, low-confidence, or does not provide enough information gain.
 
@@ -101,7 +165,7 @@ Chunking prefers paragraph and Foundation sentence boundaries, then clause/word 
 
 ## Async parsing, progress, and cancellation
 
-For UI-driven imports, projects, and bulk workflows, use the async API instead of manually wrapping synchronous parsing in `Task.detached`:
+For UI-driven imports and large/bulk workflows, use the async API instead of manually wrapping synchronous parsing in `Task.detached`:
 
 ```swift
 let parser = PdfParser(configuration: PdfParserConfiguration(
@@ -110,7 +174,7 @@ let parser = PdfParser(configuration: PdfParserConfiguration(
     retainNativeText: false
 ))
 
-let book = try await parser.parse(at: url, progress: { progress in
+let book = try await parser.parse(at: pdfURL, progress: { progress in
     print("\(progress.stage): \(progress.completedPages)/\(progress.totalPages)")
 })
 ```
@@ -118,7 +182,7 @@ let book = try await parser.parse(at: url, progress: { progress in
 When progress is not needed, `parseAsync(at:)` and `parseAsync(data:)` provide the shorter form:
 
 ```swift
-let book = try await parser.parseAsync(at: url)
+let book = try await parser.parseAsync(at: pdfURL)
 ```
 
 The older synchronous `parse(at:)` and `parse(data:)` APIs remain source-compatible, including when called from an async context. The progress-reporting async overload therefore requires the `progress:` label instead of using a default that could shadow an existing synchronous call.
@@ -161,6 +225,8 @@ Or build and launch it:
 make example-run
 ```
 
+The example includes small PDF fixtures under `Examples/Demo/TestFixtures` for quick manual parser checks. They are bundled into the generated demo app as resources.
+
 The example uses bundle identifier `com.hoangbkit.pdfkit.demo`, development team `J458WW3452`, automatic signing, hardened runtime, and App Sandbox with read-only access to user-selected PDFs. It imports the package through a local Swift package dependency (`../..`), so the example always exercises the checkout being edited.
 
 ## Current limitations
@@ -183,6 +249,6 @@ Run the package regression suite with:
 swift test
 ```
 
-Tests generate small PDF fixtures at runtime so binary fixture files are not required in the repository. CI runs the package tests, generates the XcodeGen example, and builds the example on macOS 14 with code signing disabled for CI.
+Unit tests generate deterministic small PDFs at runtime. The standalone demo additionally keeps a few tiny checked-in PDFs under `Examples/Demo/TestFixtures` for manual testing. CI runs the package tests, generates the XcodeGen example, builds it on macOS 14 with code signing disabled, and verifies the demo fixtures are present in the built app bundle.
 
-The original hardening plan is retained in `PLAN.md` for historical design context. `PHASE_STATUS.md` records the completed package-hardening work; consuming-app integration is intentionally outside this repository's scope.
+The original hardening plan is retained in `PLAN.md` for historical design context. `PHASE_STATUS.md` records the completed package-hardening work.
