@@ -1,3 +1,4 @@
+import Foundation
 import PDFKit
 import XCTest
 @testable import PDFKitAudio
@@ -16,6 +17,12 @@ final class PdfLayoutPhase9CategoryQualityTests: XCTestCase {
     func testScriptsLanguages() throws { try assertExact(category: "scripts-languages") }
     func testOCREquivalentsNativeOnly() throws { try assertExact(category: "ocr-equivalents") }
 
+    func testSelectedFixtureFromEnvironment() throws {
+        let name = try XCTUnwrap(ProcessInfo.processInfo.environment["PDFKITAUDIO_PHASE9_FIXTURE"])
+        let fixture = try XCTUnwrap(TestLayoutFixtureCatalog.byName[name], name)
+        try assertExact(fixture: fixture)
+    }
+
     private func assertExact(category: String) throws {
         let fixtures = TestLayoutFixtureCatalog.all.filter {
             $0.support == .supported
@@ -23,24 +30,30 @@ final class PdfLayoutPhase9CategoryQualityTests: XCTestCase {
                 && $0.pages.allSatisfy { $0.rendering == .native }
         }
         if fixtures.isEmpty { return }
+        for fixture in fixtures {
+            try assertExact(fixture: fixture)
+        }
+    }
 
+    private func assertExact(fixture: TestLayoutFixture) throws {
+        guard fixture.support == .supported,
+              fixture.pages.allSatisfy({ $0.rendering == .native }) else {
+            return
+        }
         let parser = PdfParser(configuration: PdfParserConfiguration(
             ocr: PdfOCRConfiguration(mode: .never),
             layout: PdfLayoutConfiguration(mode: .auto),
             cleanup: .minimal,
             extractCoverImage: false
         ))
-
-        for fixture in fixtures {
-            let book = try parser.parse(data: TestPDFBuilder.layoutPDF(fixture))
-            let score = TestLayoutBaselineScorer.score(
-                expectedMarkers: qualityMarkers(for: fixture),
-                in: book.pages.map(\.text).joined(separator: "\n\n")
-            )
-            XCTAssertEqual(score.coverage, 1, "Missing semantic marker in \(fixture.name)")
-            XCTAssertEqual(score.pairwiseAccuracy, 1, "Wrong semantic order in \(fixture.name)")
-            XCTAssertEqual(score.duplicateMarkerCount, 0, "Duplicated semantic marker in \(fixture.name)")
-        }
+        let book = try parser.parse(data: TestPDFBuilder.layoutPDF(fixture))
+        let score = TestLayoutBaselineScorer.score(
+            expectedMarkers: qualityMarkers(for: fixture),
+            in: book.pages.map(\.text).joined(separator: "\n\n")
+        )
+        XCTAssertEqual(score.coverage, 1, "Missing semantic marker in \(fixture.name)")
+        XCTAssertEqual(score.pairwiseAccuracy, 1, "Wrong semantic order in \(fixture.name)")
+        XCTAssertEqual(score.duplicateMarkerCount, 0, "Duplicated semantic marker in \(fixture.name)")
     }
 
     private func qualityMarkers(for fixture: TestLayoutFixture) -> [String] {
