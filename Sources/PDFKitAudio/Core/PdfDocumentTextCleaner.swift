@@ -169,28 +169,25 @@ enum PdfDocumentTextCleaner {
 
             let page = pages[pageOffset]
             let lines = page.text.components(separatedBy: "\n")
-            let fingerprintLines = fingerprint.text
-                .components(separatedBy: "\n")
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
 
-            for fingerprintLine in fingerprintLines {
-                guard isShortEdgeText(fingerprintLine),
-                      let lineIndex = matchingLineIndex(
-                        for: fingerprintLine,
-                        in: lines,
-                        side: side
-                      ) else {
+            for signature in fingerprint.lineSignatures {
+                guard let lineIndex = matchingLineIndex(
+                    forSignature: signature,
+                    in: lines,
+                    side: side
+                ) else {
                     continue
                 }
+                let actualLine = lines[lineIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+                guard isShortEdgeText(actualLine) else { continue }
 
                 result.append(EdgeCandidate(
                     pageOffset: pageOffset,
                     pageIndex: page.pageIndex,
                     lineIndex: lineIndex,
                     side: side,
-                    text: fingerprintLine,
-                    normalized: PdfDocumentTextSignature.normalize(fingerprintLine),
+                    text: actualLine,
+                    normalized: signature,
                     rect: fingerprint.rect,
                     role: fingerprint.role,
                     roleConfidence: fingerprint.roleConfidence,
@@ -203,11 +200,10 @@ enum PdfDocumentTextCleaner {
     }
 
     private static func matchingLineIndex(
-        for fingerprintLine: String,
+        forSignature signature: String,
         in pageLines: [String],
         side: EdgeSide
     ) -> Int? {
-        let signature = PdfDocumentTextSignature.normalize(fingerprintLine)
         let matches = pageLines.indices.filter {
             PdfDocumentTextSignature.normalize(pageLines[$0]) == signature
         }
