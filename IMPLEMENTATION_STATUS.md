@@ -6,7 +6,7 @@ This PR started as a planning-only change and is now implementing the approved p
 - [x] Phase 1 — unified positioned-fragment extraction
 - [x] Phase 2 — page complexity detector and fast-path gate
 - [x] Phase 3 — fragment-to-line and line-to-block reconstruction
-- [ ] Phase 4 — columns, spanning regions, and vertical segmentation
+- [x] Phase 4 — columns, spanning regions, and vertical segmentation
 - [ ] Phase 5 — reading-order DAG and deterministic resolver
 - [ ] Phase 6 — lightweight role classification and special structures
 - [ ] Phase 7 — geometry-aware document cleanup
@@ -64,5 +64,18 @@ This PR started as a planning-only change and is now implementing the approved p
 - A real generated PDFKit two-column fixture verifies that actual extracted fragments never produce a block crossing a strong column gutter.
 - Phase 3 remains internal and does not alter `PdfParser` selected text or public API; parser/analyzer integration remains deferred to Phase 8.
 - The Phase 3 gate passed SwiftPM tests and the generated macOS example-app build on macOS 14.
+
+### Phase 4
+
+- Added `PdfLayoutRegion`, `PdfLayoutColumn`, and `PdfPageRegionLayout` models plus deterministic page segmentation.
+- Detects 1–3 primary columns, including symmetric/asymmetric widths, narrow/wide gutters, unequal column heights, staggered starts, and short-vs-long columns.
+- Spanning/full-width blocks create vertical region boundaries, supporting layouts such as `single → columns → single` and interrupted multi-column regions.
+- Sidebar candidates are excluded from primary-column count using sparse-lane continuity, width, style, and body-lane evidence; true asymmetric second columns remain primary columns.
+- Ordinary indentation, pull quotes, and similar single-column geometry do not invent gutters or extra primary columns.
+- Region/column assignments are deterministic and stable under small coordinate perturbations.
+- Real PDFKit validation exposed same-baseline multi-column text being merged into one `PDFSelection`; native extraction now selectively inspects character geometry only for suspicious stretched line selections and splits at strong internal character gaps while keeping ordinary line-level extraction cheap.
+- Added regressions ensuring real interrupted columns recover `columnar → spanning → columnar`, real sidebars remain non-primary, and wide ordinary single-column text is not over-split.
+- Phase 4 remains internal and does not alter `PdfParser` selected text or public API.
+- The final Phase 4 head passed SwiftPM tests and the generated macOS example-app build on macOS 14.
 
 Each phase is marked complete only after its exit criteria are satisfied and CI is green.
