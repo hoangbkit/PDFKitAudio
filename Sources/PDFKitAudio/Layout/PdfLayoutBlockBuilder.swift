@@ -107,9 +107,13 @@ enum PdfLayoutBlockBuilder {
         }
 
         let verticalGap = current.rect.minY - previous.rect.maxY
+        let largestRelevantHeight = max(
+            pageMedianHeight,
+            max(previous.rect.height, current.rect.height)
+        )
         let maximumGap = max(
             0.030,
-            min(0.080, max(pageMedianHeight, previous.rect.height, current.rect.height) * 1.85)
+            min(0.080, largestRelevantHeight * 1.85)
         )
         if verticalGap < -max(0.010, pageMedianHeight * 0.35) || verticalGap > maximumGap {
             return false
