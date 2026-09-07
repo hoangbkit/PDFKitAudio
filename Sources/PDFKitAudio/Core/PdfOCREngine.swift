@@ -4,9 +4,39 @@ import PDFKit
 import Vision
 
 enum PdfOCREngine {
+    struct OCRObservation {
+        let text: String
+        let rect: CGRect
+        let confidence: Double
+        let sourceOrder: Int
+
+        init(
+            text: String,
+            rect: CGRect,
+            confidence: Double,
+            sourceOrder: Int
+        ) {
+            self.text = text
+            self.rect = rect
+            self.confidence = min(1, max(0, confidence))
+            self.sourceOrder = sourceOrder
+        }
+    }
+
     struct OCRResult {
         let text: String
         let confidence: Double
+        let observations: [OCRObservation]
+
+        init(
+            text: String,
+            confidence: Double,
+            observations: [OCRObservation] = []
+        ) {
+            self.text = text
+            self.confidence = min(1, max(0, confidence))
+            self.observations = observations
+        }
     }
 
     static func recognize(page: PDFPage, configuration: PdfOCRConfiguration) -> OCRResult? {
@@ -58,27 +88,33 @@ enum PdfOCREngine {
             return nil
         }
 
-        guard let observations = request.results else {
+        guard let results = request.results else {
             return OCRResult(text: "", confidence: 0)
         }
 
-        var lines: [String] = []
-        var confidences: [Float] = []
-        lines.reserveCapacity(observations.count)
-        confidences.reserveCapacity(observations.count)
+        var observations: [OCRObservation] = []
+        observations.reserveCapacity(results.count)
 
-        for observation in observations {
+        for (sourceOrder, observation) in results.enumerated() {
             guard let candidate = observation.topCandidates(1).first else { continue }
-            lines.append(candidate.string)
-            confidences.append(candidate.confidence)
+            observations.append(OCRObservation(
+                text: candidate.string,
+                rect: PdfLayoutGeometry.normalizedVisionRect(observation.boundingBox),
+                confidence: Double(candidate.confidence),
+                sourceOrder: sourceOrder
+            ))
         }
 
-        let averageConfidence = confidences.isEmpty
+        let averageConfidence = observations.isEmpty
             ? 0
-            : Double(confidences.reduce(0, +) / Float(confidences.count))
+            : observations.reduce(0) { $0 + $1.confidence } / Double(observations.count)
         return OCRResult(
-            text: lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines),
-            confidence: averageConfidence
+            text: observations
+                .map(\.text)
+                .joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            confidence: averageConfidence,
+            observations: observations
         )
     }
 
