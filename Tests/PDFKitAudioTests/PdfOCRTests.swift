@@ -15,6 +15,11 @@ final class PdfOCRTests: XCTestCase {
         XCTAssertEqual(configuration.recognitionLanguages, ["vi-VN", "fr-FR"])
     }
 
+    func testDefaultConfigurationUsesConservativeNativeTextThreshold() {
+        XCTAssertEqual(PdfOCRConfiguration().nativeTextThreshold, 20)
+        XCTAssertEqual(PdfParser().ocrConfiguration.nativeTextThreshold, 20)
+    }
+
     func testDefaultRequestUsesAutomaticLanguageDetectionWithoutPackageEnglishOverride() {
         let configuration = PdfOCRConfiguration()
         let request = PdfOCREngine.makeRequest(configuration: configuration)
@@ -46,6 +51,26 @@ final class PdfOCRTests: XCTestCase {
 
         XCTAssertEqual(PdfOCRPolicy.quality(of: text, threshold: 60), .usable)
         XCTAssertFalse(PdfOCRPolicy.shouldRunOCR(nativeText: text, configuration: configuration))
+    }
+
+    func testDefaultAutoModeSkipsShortHealthyDigitalPageLikeDemoFixture() throws {
+        let attempts = LockedCounter()
+        let parser = PdfParser(
+            ocrConfiguration: PdfOCRConfiguration(mode: .auto),
+            ocrRecognizer: { _, _ in
+                attempts.increment()
+                return PdfOCREngine.OCRResult(text: "Unexpected OCR", confidence: 1)
+            }
+        )
+        let data = try TestPDFBuilder.digitalPDF(pages: [
+            "Chapter One\nChapter one body text for outline parsing."
+        ])
+
+        let book = try parser.parse(data: data)
+
+        XCTAssertEqual(attempts.value, 0)
+        XCTAssertEqual(book.pages.first?.extractionSource, .native)
+        XCTAssertTrue(book.pages.first?.text.contains("Chapter one body text") ?? false)
     }
 
     func testAutoPolicyTriggersForEmptyShortAndSuspiciousNativeText() {
