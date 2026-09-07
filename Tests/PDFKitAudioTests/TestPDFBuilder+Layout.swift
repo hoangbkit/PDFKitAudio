@@ -73,16 +73,20 @@ extension TestPDFBuilder {
         let imageSize = NSSize(width: spec.size.width * scale, height: spec.size.height * scale)
         let image = NSImage(size: imageSize)
         image.lockFocus()
-        defer { image.unlockFocus() }
 
         NSColor.white.setFill()
         NSRect(origin: .zero, size: imageSize).fill()
 
         guard let cgContext = NSGraphicsContext.current?.cgContext else {
+            image.unlockFocus()
             throw FixtureError.couldNotCreateScannedPage
         }
         drawLayoutBoxes(spec.boxes, in: cgContext, pageSize: spec.size, scale: scale)
+        image.unlockFocus()
 
+        // PDFPage(image:) asks NSImage for a committed bitmap representation. It
+        // must happen after unlockFocus(); constructing the page while the image is
+        // still focused can yield a nil backing CGImage on macOS 14 CI.
         guard let page = PDFPage(image: image) else {
             throw FixtureError.couldNotCreateScannedPage
         }
