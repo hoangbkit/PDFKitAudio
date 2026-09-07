@@ -8,7 +8,7 @@ This PR started as a planning-only change and is now implementing the approved p
 - [x] Phase 3 — fragment-to-line and line-to-block reconstruction
 - [x] Phase 4 — columns, spanning regions, and vertical segmentation
 - [x] Phase 5 — reading-order DAG and deterministic resolver
-- [ ] Phase 6 — lightweight role classification and special structures
+- [x] Phase 6 — lightweight role classification and special structures
 - [ ] Phase 7 — geometry-aware document cleanup
 - [ ] Phase 8 — parser integration, selection policy, and public configuration
 - [ ] Phase 9 — comprehensive real-world and adversarial testing
@@ -84,7 +84,7 @@ This PR started as a planning-only change and is now implementing the approved p
 - Same-column blocks receive top-to-bottom precedence; primary columns are sequenced column-major left-to-right or right-to-left according to the resolved writing direction; vertical regions receive explicit region-to-region edges.
 - Spanning regions naturally precede/follow neighboring column regions, and observable trailing cross-column summaries/footers that Phase 4 conservatively associates with one lane are deferred until every primary column finishes.
 - Sidebars default to spoken order after the primary region, with a geometric policy available internally for later experimentation.
-- Semantic ordering is intentionally decoupled from role discovery: Phase 5 accepts optional footnote, caption-anchor, writing-direction, unknown-block, and additional-precedence hints; Phase 6 will be responsible for classifying blocks and producing those hints.
+- Semantic ordering is intentionally decoupled from role discovery: Phase 5 accepts optional footnote, caption-anchor, writing-direction, unknown-block, and additional-precedence hints; Phase 6 is responsible for classifying blocks and producing those hints.
 - Footnote hints place notes after main body; caption attachments place captions after their anchors; stronger semantic constraints can override weaker geometric edges through deterministic cycle resolution.
 - Cycles never drop blocks: the resolver removes the lowest-confidence inferred edge with stable tie-breaking, records the removal diagnostic, and retries topological sorting.
 - Ambiguous irregular overlap, missing region assignments, and duplicate block identifiers fail safe to deterministic geometry/source ordering rather than crashing or silently losing content.
@@ -92,5 +92,22 @@ This PR started as a planning-only change and is now implementing the approved p
 - Exact-order tests cover all supported column and mixed-region fixtures, plus repeated determinism, LTR/RTL sequencing, sidebar policy, footnote/caption hints, forced cycles, irregular-overlap fallback, missing-assignment fallback, duplicate-ID safety, and real PDFKit two-column ordering.
 - Every successful/fallback ordering path is checked for deterministic block conservation; parser-selected text and public API remain unchanged until Phase 8.
 - The Phase 5 gate passed all SwiftPM tests and the generated macOS example-app build on macOS 14.
+
+### Phase 6
+
+- Added a separate, non-destructive role-annotation layer (`PdfLayoutRole`, `PdfLayoutRoleAssignment`, and `PdfSpecialStructureAnalysis`) so semantic hints do not mutate the deterministic Phase 3–5 geometry models.
+- Transparent conservative scores classify headings, explicit list items, Phase 4 sidebars, centered pull quotes/callouts, captions, footnotes, table cells, ordinary body text, and unknown content using relative font size/emphasis, normalized geometry, text length, whitespace, page position, and explicit prefixes.
+- Heading assignments can emit strong local precedence hints; footnotes emit end-of-body hints; captions emit nearest-compatible anchor attachments consumed by the existing Phase 5 DAG resolver.
+- Footnotes require strong combined evidence such as bottom-zone placement, body-relative small type, reference markers, clustered notes, separator/rule evidence, or clear body separation; an ordinary full-size paragraph near the bottom remains body text.
+- Captions and centered pull quotes use distinct placement evidence so small centered text in the body is not automatically treated as a caption.
+- Phase 4 sidebar assignments are preserved as sidebars and are never silently skipped; their spoken ordering remains governed by the Phase 5 sidebar policy.
+- Added deterministic table structures (`PdfTableCell`, `PdfDetectedTable`) and a lightweight `PdfTableLinearizer` supporting conservative row-major output plus header-aware `Header: value` speech when a first-row header is clear.
+- Table cell recovery uses positioned source fragments with block/line provenance because Phase 3 may correctly reconstruct several horizontally separated cells as one logical line; table-grid validation then clusters rows by Y and columns by stable X lanes.
+- Table detection is gated by Phase 2 table-heavy evidence or a stricter repeated three-lane compact-grid fallback, preventing ordinary two-column prose and numbered lists from being promoted into tables.
+- Multiline cells, numeric tables, borderless tables, header rows, full-width tables, in-column tables, and tables between prose regions have deterministic regression coverage; low-confidence/ambiguous structures remain ordinary ordered blocks rather than losing content.
+- The entire single-page fixture matrix is checked for deterministic role output and exact block conservation: every input block receives exactly one assignment and no role classifier removes text.
+- Real generated PDFKit integration tests validate table structure/linearization, caption role plus anchor hint, and strong footnote classification through the full native extraction → line/block reconstruction → region → role-analysis pipeline.
+- Phase 6 remains internal and does not alter `PdfParser` selected text or public API; parser/analyzer integration remains deferred to Phase 8.
+- The Phase 6 gate passed all SwiftPM tests and the generated macOS example-app build on macOS 14.
 
 Each phase is marked complete only after its exit criteria are satisfied and CI is green.
