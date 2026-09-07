@@ -78,6 +78,11 @@ enum PdfDocumentTextCleaner {
             )
         }
 
+        protectSemanticOccurrences(
+            candidates: candidates,
+            removals: &removals
+        )
+
         guard !removals.isEmpty else { return pages }
 
         return pages.enumerated().map { pageOffset, page in
@@ -383,6 +388,28 @@ enum PdfDocumentTextCleaner {
                 for candidate in sorted.dropFirst() {
                     removals[candidate.pageOffset, default: []].insert(candidate.lineIndex)
                 }
+            }
+        }
+    }
+
+    private static func protectSemanticOccurrences(
+        candidates: [EdgeCandidate],
+        removals: inout [Int: Set<Int>]
+    ) {
+        // Legacy first/last-line windows can classify the same line as both top
+        // and bottom on very short pages. A confident semantic layout role must
+        // protect that exact occurrence across edge-side ambiguity. Proven page
+        // number patterns remain removable regardless of role hints.
+        let protected = candidates.filter { candidate in
+            candidate.role == .heading
+                && candidate.roleConfidence >= 0.70
+                && pageNumberPattern(for: candidate.text) == nil
+        }
+
+        for candidate in protected {
+            removals[candidate.pageOffset]?.remove(candidate.lineIndex)
+            if removals[candidate.pageOffset]?.isEmpty == true {
+                removals.removeValue(forKey: candidate.pageOffset)
             }
         }
     }
