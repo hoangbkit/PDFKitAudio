@@ -6,12 +6,25 @@ enum PdfDocumentTextCleaner {
         case bottom
     }
 
-    private struct EdgeCandidate: Hashable {
+    private struct EdgeCandidate {
         let pageOffset: Int
         let pageIndex: Int
         let lineIndex: Int
         let side: EdgeSide
         let text: String
+        let normalized: String
+        let rect: CGRect?
+        let role: PdfLayoutRole?
+        let roleConfidence: Double
+        let styleBucket: PdfDocumentLayoutStyleBucket?
+
+        var hasGeometry: Bool { rect != nil }
+    }
+
+    private struct CandidateKey: Hashable {
+        let pageOffset: Int
+        let lineIndex: Int
+        let side: EdgeSide
         let normalized: String
     }
 
@@ -34,7 +47,8 @@ enum PdfDocumentTextCleaner {
 
     static func clean(
         _ pages: [PdfPageContent],
-        configuration: PdfCleanupConfiguration
+        configuration: PdfCleanupConfiguration,
+        layoutFingerprints: [PdfDocumentLayoutFingerprint] = []
     ) -> [PdfPageContent] {
         guard !pages.isEmpty,
               configuration.removesRepeatedHeadersAndFooters
@@ -42,7 +56,10 @@ enum PdfDocumentTextCleaner {
             return pages
         }
 
-        let candidates = edgeCandidates(from: pages)
+        let candidates = edgeCandidates(
+            from: pages,
+            layoutFingerprints: layoutFingerprints
+        )
         var removals: [Int: Set<Int>] = [:]
 
         if configuration.removesRepeatedHeadersAndFooters {
@@ -84,8 +101,11 @@ enum PdfDocumentTextCleaner {
         }
     }
 
-    private static func edgeCandidates(from pages: [PdfPageContent]) -> [EdgeCandidate] {
-        var result: [EdgeCandidate] = []
+    private static func edgeCandidates(
+        from pages: [PdfPageContent],
+        layoutFingerprints: [PdfDocumentLayoutFingerprint]
+    ) -> [EdgeCandidate] {
+        var candidates: [EdgeCandidate] = []
 
         for (pageOffset, page) in pages.enumerated() {
             let lines = page.text.components(separatedBy: "\n")
@@ -102,7 +122,7 @@ enum PdfDocumentTextCleaner {
                     side: .top,
                     line: lines[lineIndex]
                 ) {
-                    result.append(candidate)
+                    candidates.append(candidate)
                 }
             }
 
@@ -114,12 +134,84 @@ enum PdfDocumentTextCleaner {
                     side: .bottom,
                     line: lines[lineIndex]
                 ) {
-                    result.append(candidate)
+                    candidates.append(candidate)
                 }
             }
         }
 
+        if !layoutFingerprints.isEmpty {
+            candidates.append(contentsOf: geometryCandidates(
+                from: pages,
+                fingerprints: layoutFingerprints
+            ))
+        }
+
+        return deduplicated(candidates)
+    }
+
+    private static func geometryCandidates(
+        from pages: [PdfPageContent],
+        fingerprints: [PdfDocumentLayoutFingerprint]
+    ) -> [EdgeCandidate] {
+        let pageOffsets = Dictionary(uniqueKeysWithValues: pages.enumerated().map { ($0.element.pageIndex, $0.offset) })
+        var result: [EdgeCandidate] = []
+
+        for fingerprint in fingerprints.sorted(by: fingerprintOrder) {
+            guard let pageOffset = pageOffsets[fingerprint.pageIndex],
+                  let side = edgeSide(for: fingerprint.rect) else {
+                continue
+            }
+
+            let page = pages[pageOffset]
+            let lines = page.text.components(separatedBy: "\n")
+            let fingerprintLines = fingerprint.text
+                .components(separatedBy: "\n")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+
+            for fingerprintLine in fingerprintLines {
+                guard isShortEdgeText(fingerprintLine),
+                      let lineIndex = matchingLineIndex(
+                        for: fingerprintLine,
+                        in: lines,
+                        side: side
+                      ) else {
+                    continue
+                }
+
+                result.append(EdgeCandidate(
+                    pageOffset: pageOffset,
+                    pageIndex: page.pageIndex,
+                    lineIndex: lineIndex,
+                    side: side,
+                    text: fingerprintLine,
+                    normalized: PdfDocumentTextSignature.normalize(fingerprintLine),
+                    rect: fingerprint.rect,
+                    role: fingerprint.role,
+                    roleConfidence: fingerprint.roleConfidence,
+                    styleBucket: fingerprint.styleBucket
+                ))
+            }
+        }
+
         return result
+    }
+
+    private static func matchingLineIndex(
+        for fingerprintLine: String,
+        in pageLines: [String],
+        side: EdgeSide
+    ) -> Int? {
+        let signature = PdfDocumentTextSignature.normalize(fingerprintLine)
+        let matches = pageLines.indices.filter {
+            PdfDocumentTextSignature.normalize(pageLines[$0]) == signature
+        }
+        switch side {
+        case .top:
+            return matches.first
+        case .bottom:
+            return matches.last
+        }
     }
 
     private static func makeCandidate(
@@ -130,11 +222,7 @@ enum PdfDocumentTextCleaner {
         line: String
     ) -> EdgeCandidate? {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty,
-              trimmed.count <= 100,
-              trimmed.split(whereSeparator: \.isWhitespace).count <= 14 else {
-            return nil
-        }
+        guard isShortEdgeText(trimmed) else { return nil }
 
         return EdgeCandidate(
             pageOffset: pageOffset,
@@ -142,8 +230,40 @@ enum PdfDocumentTextCleaner {
             lineIndex: lineIndex,
             side: side,
             text: trimmed,
-            normalized: normalizeForComparison(trimmed)
+            normalized: PdfDocumentTextSignature.normalize(trimmed),
+            rect: nil,
+            role: nil,
+            roleConfidence: 0,
+            styleBucket: nil
         )
+    }
+
+    private static func deduplicated(_ candidates: [EdgeCandidate]) -> [EdgeCandidate] {
+        var byKey: [CandidateKey: EdgeCandidate] = [:]
+        for candidate in candidates {
+            let key = CandidateKey(
+                pageOffset: candidate.pageOffset,
+                lineIndex: candidate.lineIndex,
+                side: candidate.side,
+                normalized: candidate.normalized
+            )
+            guard let existing = byKey[key] else {
+                byKey[key] = candidate
+                continue
+            }
+
+            if shouldPrefer(candidate, over: existing) {
+                byKey[key] = candidate
+            }
+        }
+
+        return byKey.values.sorted(by: stableCandidateOrder)
+    }
+
+    private static func shouldPrefer(_ lhs: EdgeCandidate, over rhs: EdgeCandidate) -> Bool {
+        if lhs.hasGeometry != rhs.hasGeometry { return lhs.hasGeometry }
+        if lhs.roleConfidence != rhs.roleConfidence { return lhs.roleConfidence > rhs.roleConfidence }
+        return lhs.text < rhs.text
     }
 
     private static func collectRepeatedRunningMatter(
@@ -168,15 +288,39 @@ enum PdfDocumentTextCleaner {
             let uniquePages = Set(group.map(\.pageOffset))
             guard uniquePages.count >= required else { continue }
 
-            // Keep the first occurrence as a conservative semantic anchor. This
-            // prevents a genuine chapter heading from disappearing everywhere
-            // merely because later pages repeat it as running matter.
-            let sorted = group.sorted {
-                if $0.pageIndex != $1.pageIndex { return $0.pageIndex < $1.pageIndex }
-                return $0.lineIndex < $1.lineIndex
+            let runningCandidates: [EdgeCandidate]
+            let geometryPages = Set(group.filter(\.hasGeometry).map(\.pageOffset))
+            if geometryPages.count >= required {
+                guard let cluster = dominantGeometryCluster(
+                    candidates: group,
+                    requiredOccurrences: required
+                ) else {
+                    // Enough layout metadata exists to judge geometry, so a lack
+                    // of a stable edge cluster is evidence against removal.
+                    continue
+                }
+                runningCandidates = cluster
+            } else {
+                // Mixed analyzed/fast-path documents deliberately keep the
+                // existing text-only behavior until enough geometry exists.
+                runningCandidates = group
             }
-            for candidate in sorted.dropFirst() {
-                removals[candidate.pageOffset, default: []].insert(candidate.lineIndex)
+
+            guard Set(runningCandidates.map(\.pageOffset)).count >= required else { continue }
+            let sortedRunning = runningCandidates.sorted(by: stableCandidateOrder)
+
+            if let semanticAnchor = semanticAnchor(in: group) {
+                // A chapter heading or other confidently classified semantic
+                // occurrence wins over geometrically repetitive running matter.
+                for candidate in sortedRunning where !sameOccurrence(candidate, semanticAnchor) {
+                    removals[candidate.pageOffset, default: []].insert(candidate.lineIndex)
+                }
+            } else {
+                // Preserve the existing conservative principle: repeated text is
+                // spoken once unless it is proven non-semantic pagination.
+                for candidate in sortedRunning.dropFirst() {
+                    removals[candidate.pageOffset, default: []].insert(candidate.lineIndex)
+                }
             }
         }
     }
@@ -200,37 +344,103 @@ enum PdfDocumentTextCleaner {
 
         for group in grouped.values {
             guard let firstPattern = group.first?.1 else { continue }
-            let uniquePages = Set(group.map { $0.0.pageOffset })
-            // Two points are not enough evidence for numeric pagination: a
-            // two-page report containing consecutive years would otherwise be
-            // indistinguishable from page numbers. Require at least three pages.
             let required = firstPattern.isPurePagination
                 ? 3
                 : requiredOccurrences(pageCount: pageCount)
+            let uniquePages = Set(group.map { $0.0.pageOffset })
             guard uniquePages.count >= required else { continue }
 
-            let sorted = group.sorted {
-                if $0.0.pageIndex != $1.0.pageIndex { return $0.0.pageIndex < $1.0.pageIndex }
-                return $0.0.lineIndex < $1.0.lineIndex
+            let candidatesOnly = group.map(\.0)
+            let effectiveCandidates: [EdgeCandidate]
+            let geometryPages = Set(candidatesOnly.filter(\.hasGeometry).map(\.pageOffset))
+            if geometryPages.count >= required {
+                guard let cluster = dominantGeometryCluster(
+                    candidates: candidatesOnly,
+                    requiredOccurrences: required
+                ) else {
+                    continue
+                }
+                effectiveCandidates = cluster
+            } else {
+                effectiveCandidates = candidatesOnly
             }
+
+            guard Set(effectiveCandidates.map(\.pageOffset)).count >= required else { continue }
+            let sorted = effectiveCandidates.sorted(by: stableCandidateOrder)
 
             if firstPattern.isPurePagination {
                 // A proven numeric pagination sequence is not semantic content.
-                for pair in sorted {
-                    removals[pair.0.pageOffset, default: []].insert(pair.0.lineIndex)
+                for candidate in sorted {
+                    removals[candidate.pageOffset, default: []].insert(candidate.lineIndex)
+                }
+            } else if let anchor = semanticAnchor(in: candidatesOnly) {
+                for candidate in sorted where !sameOccurrence(candidate, anchor) {
+                    removals[candidate.pageOffset, default: []].insert(candidate.lineIndex)
                 }
             } else {
-                // Decorated running matter such as `Some Book • 42` retains one
-                // occurrence for the same conservative reason as exact headers.
-                for pair in sorted.dropFirst() {
-                    removals[pair.0.pageOffset, default: []].insert(pair.0.lineIndex)
+                // Decorated running matter retains one occurrence for the same
+                // conservative reason as exact repeated headers.
+                for candidate in sorted.dropFirst() {
+                    removals[candidate.pageOffset, default: []].insert(candidate.lineIndex)
                 }
             }
         }
     }
 
+    private static func dominantGeometryCluster(
+        candidates: [EdgeCandidate],
+        requiredOccurrences: Int
+    ) -> [EdgeCandidate]? {
+        let geometric = candidates.filter(\.hasGeometry)
+        guard !geometric.isEmpty else { return nil }
+
+        let heights = geometric.compactMap { $0.rect?.height }.filter { $0.isFinite && $0 > 0 }
+        let medianHeight = median(heights) ?? 0.015
+        let tolerance = max(0.022, min(0.060, medianHeight * 1.8))
+
+        var best: [EdgeCandidate] = []
+        for seed in geometric.sorted(by: stableCandidateOrder) {
+            guard let seedY = seed.rect?.midY else { continue }
+            let cluster = geometric.filter { candidate in
+                guard let y = candidate.rect?.midY else { return false }
+                return abs(y - seedY) <= tolerance
+            }
+            let uniquePages = Set(cluster.map(\.pageOffset)).count
+            let bestPages = Set(best.map(\.pageOffset)).count
+            if uniquePages > bestPages
+                || (uniquePages == bestPages && stableClusterKey(cluster) < stableClusterKey(best)) {
+                best = cluster
+            }
+        }
+
+        guard Set(best.map(\.pageOffset)).count >= requiredOccurrences else { return nil }
+        return best.sorted(by: stableCandidateOrder)
+    }
+
+    private static func semanticAnchor(in candidates: [EdgeCandidate]) -> EdgeCandidate? {
+        candidates
+            .filter { candidate in
+                guard candidate.roleConfidence >= 0.70, let role = candidate.role else { return false }
+                switch role {
+                case .heading:
+                    return true
+                case .body, .listItem, .sidebar, .pullQuote, .caption, .footnote, .tableCell, .runningMatter, .unknown:
+                    return false
+                }
+            }
+            .sorted(by: stableCandidateOrder)
+            .first
+    }
+
+    private static func edgeSide(for rect: CGRect) -> EdgeSide? {
+        guard rect.minY.isFinite, rect.maxY.isFinite else { return nil }
+        if rect.maxY <= 0.30 { return .top }
+        if rect.minY >= 0.70 { return .bottom }
+        return nil
+    }
+
     private static func pageNumberPattern(for text: String) -> NumberPattern? {
-        let normalized = collapseSpaces(text).lowercased()
+        let normalized = PdfDocumentTextSignature.collapseSpaces(text).lowercased()
 
         if let match = firstMatch(of: purePageNumberRegex, in: normalized),
            let numberRange = Range(match.range(at: 1), in: normalized),
@@ -246,7 +456,7 @@ enum PdfDocumentTextCleaner {
            let prefixRange = Range(match.range(at: 1), in: normalized),
            let numberRange = Range(match.range(at: 2), in: normalized),
            let number = Int(normalized[numberRange]) {
-            let prefix = normalizeForComparison(String(normalized[prefixRange]))
+            let prefix = PdfDocumentTextSignature.normalize(String(normalized[prefixRange]))
             guard prefix.contains(where: \.isLetter) else { return nil }
             return NumberPattern(
                 number: number,
@@ -272,16 +482,58 @@ enum PdfDocumentTextCleaner {
         max(3, Int(ceil(Double(pageCount) * 0.4)))
     }
 
-    private static func normalizeForComparison(_ text: String) -> String {
-        collapseSpaces(text)
-            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
-            .lowercased()
+    private static func isShortEdgeText(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty
+            && trimmed.count <= 100
+            && trimmed.split(whereSeparator: \.isWhitespace).count <= 14
     }
 
-    private static func collapseSpaces(_ text: String) -> String {
-        text
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression)
+    private static func sameOccurrence(_ lhs: EdgeCandidate, _ rhs: EdgeCandidate) -> Bool {
+        lhs.pageOffset == rhs.pageOffset
+            && lhs.lineIndex == rhs.lineIndex
+            && lhs.side == rhs.side
+            && lhs.normalized == rhs.normalized
+    }
+
+    private static func stableCandidateOrder(_ lhs: EdgeCandidate, _ rhs: EdgeCandidate) -> Bool {
+        if lhs.pageIndex != rhs.pageIndex { return lhs.pageIndex < rhs.pageIndex }
+        if lhs.lineIndex != rhs.lineIndex { return lhs.lineIndex < rhs.lineIndex }
+        if lhs.side != rhs.side { return sideRank(lhs.side) < sideRank(rhs.side) }
+        return lhs.normalized < rhs.normalized
+    }
+
+    private static func fingerprintOrder(
+        _ lhs: PdfDocumentLayoutFingerprint,
+        _ rhs: PdfDocumentLayoutFingerprint
+    ) -> Bool {
+        if lhs.pageIndex != rhs.pageIndex { return lhs.pageIndex < rhs.pageIndex }
+        if lhs.rect.minY != rhs.rect.minY { return lhs.rect.minY < rhs.rect.minY }
+        if lhs.rect.minX != rhs.rect.minX { return lhs.rect.minX < rhs.rect.minX }
+        return lhs.blockID < rhs.blockID
+    }
+
+    private static func stableClusterKey(_ candidates: [EdgeCandidate]) -> String {
+        candidates.sorted(by: stableCandidateOrder).map {
+            "\($0.pageIndex):\($0.lineIndex):\($0.normalized)"
+        }.joined(separator: "|")
+    }
+
+    private static func sideRank(_ side: EdgeSide) -> Int {
+        switch side {
+        case .top: return 0
+        case .bottom: return 1
+        }
+    }
+
+    private static func median(_ values: [CGFloat]) -> CGFloat? {
+        guard !values.isEmpty else { return nil }
+        let sorted = values.sorted()
+        let middle = sorted.count / 2
+        if sorted.count.isMultiple(of: 2) {
+            return (sorted[middle - 1] + sorted[middle]) / 2
+        }
+        return sorted[middle]
     }
 
     private static let purePageNumberRegex = try! NSRegularExpression(
