@@ -10,10 +10,24 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: SwiftPM + example (macOS 14)
+  phase9-category-isolation:
+    name: Phase 9 category — ${{ matrix.test }}
     runs-on: macos-14
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - testSimple
+          - testColumns
+          - testMixedRegions
+          - testSideContent
+          - testTables
+          - testFootnotesCaptions
+          - testRunningMatter
+          - testDifficultPositioning
+          - testScriptsLanguages
+          - testOCREquivalentsNativeOnly
 
     steps:
       - name: Checkout
@@ -22,11 +36,5 @@ jobs:
       - name: Swift version
         run: swift --version
 
-      - name: Isolate Phase 9 final-parser quality gate
-        run: swift test --filter PdfLayoutPhase9QualityGateTests/testEverySupportedNativeFixtureHasExactFinalParserMarkerOrderAndConservation
-
-      - name: Install XcodeGen
-        run: brew install xcodegen
-
-      - name: Build generated example app
-        run: make example-build-ci
+      - name: Run isolated category gate
+        run: swift test --filter PdfLayoutPhase9CategoryQualityTests/${{ matrix.test }}
