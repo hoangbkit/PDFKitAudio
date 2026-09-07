@@ -43,6 +43,7 @@ settings:
 
 fileGroups:
   - project.yml
+  - TestFixtures/README.md
 
 targets:
   PDFKitAudioDemo:
@@ -51,6 +52,10 @@ targets:
     deploymentTarget: "14.0"
     sources:
       - path: Sources
+    resources:
+      - path: TestFixtures/digital-text.pdf
+      - path: TestFixtures/outline-chapters.pdf
+      - path: TestFixtures/blank-page.pdf
     dependencies:
       - package: PDFKitAudio
         product: PDFKitAudio
