@@ -25,7 +25,7 @@ public final class PdfParser: Sendable {
     /// Backward-compatible initializer for existing callers.
     public init(
         ocrMode: OCROptions = .auto,
-        ocrThreshold: Int = 60,
+        ocrThreshold: Int = 20,
         cleanupConfiguration: PdfCleanupConfiguration = .audiobookDefault,
         extractCoverImage: Bool = true
     ) {
