@@ -122,15 +122,149 @@ final class PdfRealFixturePhase1Tests: XCTestCase {
         }
     }
 
+    func testPhase1FixturesPreserveAllNativeWordsThroughPagesChaptersAndSpeech() throws {
+        for name in ["02-two-columns", "03-three-columns", "12-dense-academic"] {
+            let data = try fixtureData(name)
+            let document = try XCTUnwrap(PDFDocument(data: data), name)
+            let book = try parser().parse(data: data)
+            let original = (0..<document.pageCount).compactMap {
+                document.page(at: $0)?.string
+            }.joined(separator: "\n")
+
+            // Count every word, including repeated prose and punctuation. Marker
+            // order alone cannot detect dropped or duplicated non-marker text.
+            let expected = wordCounts(original)
+            XCTAssertEqual(wordCounts(book.allPlainText()), expected, name)
+            XCTAssertEqual(wordCounts(book.chapters.map(\.plainText).joined(separator: "\n")), expected, name)
+            let segments = book.audiobookScript(maxCharsPerSegment: 120)
+            XCTAssertEqual(wordCounts(segments.map(\.text).joined(separator: "\n")), expected, name)
+            XCTAssertEqual(book.pages.count, document.pageCount, name)
+            XCTAssertEqual(book.pages.map(\.pageIndex), Array(0..<document.pageCount), name)
+            XCTAssertTrue(book.pages.allSatisfy { $0.extractionSource == .native }, name)
+            XCTAssertEqual(book.ocrPageCount, 0, name)
+            XCTAssertTrue(segments.allSatisfy {
+                $0.sourcePageRange.lowerBound >= 0
+                    && $0.sourcePageRange.upperBound < document.pageCount
+            }, name)
+        }
+    }
+
+    func testDemoDefaultAsyncURLParsingMatchesVerifiedPhase1Output() async throws {
+        for name in ["02-two-columns", "03-three-columns", "12-dense-academic"] {
+            let expected = try parsedText(name)
+            // Match BookViewModel: default OCR, cleanup, layout, and cover options,
+            // with the same asynchronous URL API used when opening a PDF.
+            let book = try await PdfParser(configuration: PdfParserConfiguration())
+                .parseAsync(at: fixtureURL(name))
+            XCTAssertEqual(book.allPlainText(), expected, name)
+            XCTAssertEqual(book.chapters.map(\.plainText).joined(separator: "\n\n"), expected, name)
+            XCTAssertTrue(book.pages.allSatisfy { $0.extractionSource == .native }, name)
+        }
+    }
+
+    func testAllRealFixturesProduceDeterministicNonemptyNativeOutput() throws {
+        for name in allFixtureNames {
+            let data = try fixtureData(name)
+            let first = try parser().parse(data: data)
+            let second = try parser().parse(data: data)
+            XCTAssertFalse(first.allPlainText().isEmpty, name)
+            XCTAssertEqual(first.pages.map(\.text), second.pages.map(\.text), name)
+            XCTAssertEqual(first.audiobookScript().map(\.id), second.audiobookScript().map(\.id), name)
+            XCTAssertTrue(first.pages.allSatisfy { $0.extractionSource == .native }, name)
+        }
+    }
+
+    func testRealExtractionDiagnosticsPreserveNativeRangesAndSelectedText() throws {
+        for name in allFixtureNames {
+            let document = try XCTUnwrap(PDFDocument(data: fixtureData(name)))
+            for index in 0..<document.pageCount {
+                let page = try XCTUnwrap(document.page(at: index))
+                var snapshot: PdfPositionedTextExtractor.ExtractionSnapshot?
+                let fragments = PdfPositionedTextExtractor.nativeFragments(page: page, diagnostics: { snapshot = $0 })
+                let capture = try XCTUnwrap(snapshot, name)
+                XCTAssertEqual(capture.nativeText, page.string, name)
+                XCTAssertFalse(capture.selections.isEmpty, name)
+                let visibleSelections = capture.selections.filter {
+                    !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                }
+                for selection in visibleSelections {
+                    XCTAssertFalse(selection.ranges.isEmpty, "\(name): \(selection.text)")
+                    XCTAssertEqual(selection.glyphs.count, selection.ranges.reduce(0) { $0 + $1.length }, name)
+                }
+                XCTAssertEqual(capture.fragments.map(\.text), fragments.map(\.text), name)
+                for fragment in fragments {
+                    XCTAssertFalse(fragment.sourceRanges.isEmpty, name)
+                    let selected = fragment.sourceRanges.compactMap { page.selection(for: $0)?.string }.joined()
+                    XCTAssertEqual(selected.trimmingCharacters(in: .newlines), fragment.text, name)
+                }
+                if ProcessInfo.processInfo.environment["PDFKITAUDIO_LAYOUT_DIAGNOSTICS"] == "1" {
+                    print("\(name) page \(index)\n\(capture.textDescription)")
+                }
+            }
+        }
+    }
+
+    func testRealSingleColumnKeepsLegacyTextAndAnalyzerFastPath() throws {
+        let data = try fixtureData("01-single-column")
+        let document = try XCTUnwrap(PDFDocument(data: data))
+        let page = try XCTUnwrap(document.page(at: 0))
+        var snapshot: PdfLayoutDiagnostics.Snapshot?
+        let analyzed = try PdfLayoutAnalyzer.analyze(
+            fragments: PdfPositionedTextExtractor.nativeFragments(page: page),
+            nativeText: page.string ?? "",
+            nativeTextThreshold: 20,
+            pageIndex: 0,
+            mode: .auto,
+            diagnostics: { snapshot = $0 }
+        )
+        XCTAssertNil(analyzed)
+        XCTAssertEqual(snapshot?.decision, .fastPath)
+        XCTAssertEqual(
+            try parser().parse(data: data).allPlainText(),
+            try parser(layout: .never).parse(data: data).allPlainText()
+        )
+    }
+
+    func testPhase1RealColumnsAreAcceptedWithoutFallback() throws {
+        for name in ["02-two-columns", "03-three-columns", "12-dense-academic"] {
+            let document = try XCTUnwrap(PDFDocument(data: fixtureData(name)))
+            for pageIndex in 0..<document.pageCount {
+                let page = try XCTUnwrap(document.page(at: pageIndex))
+                var snapshot: PdfLayoutDiagnostics.Snapshot?
+                let result = try PdfLayoutAnalyzer.analyze(
+                    fragments: PdfPositionedTextExtractor.nativeFragments(page: page),
+                    nativeText: page.string ?? "",
+                    nativeTextThreshold: 20,
+                    pageIndex: pageIndex,
+                    mode: .auto,
+                    diagnostics: { snapshot = $0 }
+                )
+                XCTAssertNotNil(result, "\(name): \(snapshot?.textDescription ?? "No diagnostics")")
+                XCTAssertEqual(snapshot?.decision, .accepted, name)
+                XCTAssertEqual(snapshot?.readingOrderUsedFallback, false, name)
+                if ProcessInfo.processInfo.environment["PDFKITAUDIO_LAYOUT_DIAGNOSTICS"] == "1" {
+                    print("\(name)\n\(snapshot?.jsonString ?? "No diagnostics")\nNative text:\n\(page.string ?? "")")
+                }
+            }
+        }
+    }
+
+    private func wordCounts(_ text: String) -> [String: Int] {
+        Dictionary(text.split(whereSeparator: \.isWhitespace).map { (String($0), 1) }, uniquingKeysWith: +)
+    }
+
     private func parsedText(_ name: String) throws -> String {
-        let parser = PdfParser(configuration: PdfParserConfiguration(
+        let book = try parser().parse(data: fixtureData(name))
+        return book.pages.map(\.text).joined(separator: "\n\n")
+    }
+
+    private func parser(layout: PdfLayoutMode = .auto) -> PdfParser {
+        PdfParser(configuration: PdfParserConfiguration(
             ocr: PdfOCRConfiguration(mode: .never),
-            layout: PdfLayoutConfiguration(mode: .auto),
+            layout: PdfLayoutConfiguration(mode: layout),
             cleanup: .minimal,
             extractCoverImage: false
         ))
-        let book = try parser.parse(data: fixtureData(name))
-        return book.pages.map(\.text).joined(separator: "\n\n")
     }
 
     private func fixtureData(_ name: String) throws -> Data {

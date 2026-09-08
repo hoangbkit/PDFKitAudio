@@ -135,10 +135,7 @@ extension TestPDFBuilder {
             paragraph.alignment = box.alignment
             paragraph.lineBreakMode = .byWordWrapping
 
-            let font = NSFont.systemFont(
-                ofSize: box.fontSize * scale,
-                weight: box.fontWeight
-            )
+            let font = fixtureFont(size: box.fontSize * scale, weight: box.fontWeight)
             NSString(string: box.text).draw(
                 in: rect,
                 withAttributes: [

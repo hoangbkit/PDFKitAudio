@@ -165,7 +165,7 @@ enum TestPDFBuilder {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineSpacing = 4
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 14),
+            .font: fixtureFont(size: 14),
             .foregroundColor: NSColor.black,
             .paragraphStyle: paragraph
         ]
@@ -190,13 +190,24 @@ enum TestPDFBuilder {
         NSString(string: text).draw(
             in: NSRect(x: 100, y: 100, width: size.width - 200, height: size.height - 200),
             withAttributes: [
-                .font: NSFont.systemFont(ofSize: 32),
+                .font: fixtureFont(size: 32),
                 .foregroundColor: NSColor.black,
                 .paragraphStyle: paragraph
             ]
         )
         image.unlockFocus()
         return image
+    }
+
+    /// Public PostScript names embed predictably in generated PDFs. Private
+    /// variable system-font names can be substituted on reload, changing glyph
+    /// geometry and breaking source markers (notably underscores) across OS/SDKs.
+    static func fixtureFont(size: CGFloat, weight: NSFont.Weight = .regular) -> NSFont {
+        let name = weight >= .semibold ? "Helvetica-Bold" : "Helvetica"
+        guard let font = NSFont(name: name, size: size) else {
+            preconditionFailure("Missing standard fixture font: \(name)")
+        }
+        return font
     }
 
     enum FixtureError: Error {

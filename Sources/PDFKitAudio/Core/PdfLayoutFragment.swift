@@ -11,6 +11,8 @@ struct PdfLayoutFragment {
     let confidence: Double
     let sourceOrder: Int
     let style: PdfLayoutStyleHints?
+    /// Exact PDFKit text ranges when available; OCR has no native character ranges.
+    let sourceRanges: [NSRange]
 
     init(
         id: Int,
@@ -19,7 +21,8 @@ struct PdfLayoutFragment {
         source: PdfExtractionSource,
         confidence: Double,
         sourceOrder: Int,
-        style: PdfLayoutStyleHints? = nil
+        style: PdfLayoutStyleHints? = nil,
+        sourceRanges: [NSRange] = []
     ) {
         self.id = id
         self.text = text
@@ -28,6 +31,7 @@ struct PdfLayoutFragment {
         self.confidence = min(1, max(0, confidence))
         self.sourceOrder = sourceOrder
         self.style = style
+        self.sourceRanges = sourceRanges
     }
 }
 

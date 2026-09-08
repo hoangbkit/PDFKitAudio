@@ -18,7 +18,7 @@ final class PdfPositionedTextExtractorColumnSplitTests: XCTestCase {
         XCTAssertTrue(fragments.contains { $0.text.contains("R1") && !$0.text.contains("L1") })
         XCTAssertTrue(fragments.contains { $0.text.contains("L2") && !$0.text.contains("R2") })
         XCTAssertTrue(fragments.contains { $0.text.contains("R2") && !$0.text.contains("L2") })
-        XCTAssertTrue(fragments.contains { $0.text.contains("FIGURE_CAPTION") })
+        XCTAssertTrue(fragments.contains { $0.text.contains("FIGURE_CAPTION") }, fragments.map(\.text).joined(separator: " | "))
     }
 
     func testWideSingleColumnLinesAreNotOverSplit() throws {

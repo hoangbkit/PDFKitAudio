@@ -101,7 +101,8 @@ enum PdfLayoutAnalyzer {
             return nil
         }
 
-        let blocks = PdfLayoutBlockBuilder.build(lines: lines)
+        let simpleColumns = PdfSimpleColumnLayout.resolve(lines: lines)
+        let blocks = simpleColumns?.blocks ?? PdfLayoutBlockBuilder.build(lines: lines)
         diagnosticCapture?.record(blocks: blocks)
         guard !blocks.isEmpty else {
             finishDiagnostics(.fallback, reason: "Block reconstruction produced no readable blocks.")
@@ -117,9 +118,9 @@ enum PdfLayoutAnalyzer {
         }
 
         try checkpoint()
-        let layout = PdfLayoutRegionDetector.segment(blocks: blocks)
-        let rawSpecial = PdfLayoutRoleClassifier.analyze(blocks: blocks, layout: layout)
-        let special = reconciledSpecialStructures(
+        let layout = simpleColumns?.layout ?? PdfLayoutRegionDetector.segment(blocks: blocks)
+        let rawSpecial = simpleColumns?.analysis ?? PdfLayoutRoleClassifier.analyze(blocks: blocks, layout: layout)
+        let special = simpleColumns?.analysis ?? reconciledSpecialStructures(
             rawSpecial,
             assessment: assessment,
             blocks: blocks,
@@ -133,7 +134,7 @@ enum PdfLayoutAnalyzer {
             return nil
         }
 
-        let readingOrder = PdfReadingOrderResolver.resolve(
+        let readingOrder = simpleColumns?.readingOrder ?? PdfReadingOrderResolver.resolve(
             blocks: blocks,
             layout: layout,
             hints: special.readingOrderHints
@@ -184,7 +185,9 @@ enum PdfLayoutAnalyzer {
             assessment: assessment,
             readingOrder: readingOrder
         )
-        finishDiagnostics(.accepted, reason: "Layout reconstruction passed all structural, confidence, and information-safety gates.")
+        finishDiagnostics(.accepted, reason: simpleColumns == nil
+            ? "Layout reconstruction passed all structural, confidence, and information-safety gates."
+            : "Direct persistent-gutter column ordering passed all structural and information-safety gates.")
         return result
     }
 

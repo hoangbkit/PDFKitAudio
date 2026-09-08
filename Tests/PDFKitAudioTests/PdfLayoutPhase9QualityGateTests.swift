@@ -155,7 +155,9 @@ final class PdfLayoutPhase9QualityGateTests: XCTestCase {
         }
 
         XCTAssertGreaterThan(evaluated, 10)
-        XCTAssertGreaterThan(necessaryRepairs, 0)
+        // PDFKit may serialize all healthy fixtures correctly on a given OS.
+        // Fast-path precision must not require an extraction defect to exist.
+        XCTAssertEqual(evaluated + necessaryRepairs, fixtures.count)
         let precision = Double(equivalent) / Double(max(1, evaluated))
         XCTAssertGreaterThanOrEqual(precision, 0.99)
     }

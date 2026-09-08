@@ -18,7 +18,9 @@ final class PdfLayoutPhase9CategoryQualityTests: XCTestCase {
     func testOCREquivalentsNativeOnly() throws { try assertExact(category: "ocr-equivalents") }
 
     func testSelectedFixtureFromEnvironment() throws {
-        let name = try XCTUnwrap(ProcessInfo.processInfo.environment["PDFKITAUDIO_PHASE9_FIXTURE"])
+        guard let name = ProcessInfo.processInfo.environment["PDFKITAUDIO_PHASE9_FIXTURE"] else {
+            throw XCTSkip("Set PDFKITAUDIO_PHASE9_FIXTURE to run a selected fixture")
+        }
         let fixture = try XCTUnwrap(TestLayoutFixtureCatalog.byName[name], name)
         try assertExact(fixture: fixture)
     }
