@@ -20,7 +20,10 @@ let package = Package(
         .testTarget(
             name: "PDFKitAudioTests",
             dependencies: ["PDFKitAudio"],
-            path: "Tests/PDFKitAudioTests"
+            path: "Tests/PDFKitAudioTests",
+            resources: [
+                .copy("TestFixtures/PDFLayout")
+            ]
         )
     ]
 )
