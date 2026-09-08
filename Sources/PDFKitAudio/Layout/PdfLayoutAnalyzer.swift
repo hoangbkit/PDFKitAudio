@@ -71,6 +71,7 @@ enum PdfLayoutAnalyzer {
             nativeTextThreshold: nativeTextThreshold
         )
         diagnosticCapture?.record(assessment: assessment)
+        let gutters = PdfSimpleColumnLayout.fragmentGutters(positioned)
 
         switch mode {
         case .never:
@@ -82,6 +83,7 @@ enum PdfLayoutAnalyzer {
             // order when a high-confidence simple page contains a large vertical
             // backtrack (for example body text serialized before a title/header).
             guard assessment.shouldAnalyze
+                    || !gutters.isEmpty
                     || shouldRepairSimpleOrder(fragments: positioned, assessment: assessment) else {
                 finishDiagnostics(
                     .fastPath,
@@ -94,15 +96,15 @@ enum PdfLayoutAnalyzer {
         }
 
         try checkpoint()
-        let lines = PdfLayoutLineBuilder.build(fragments: positioned)
+        let lines = PdfLayoutLineBuilder.build(fragments: positioned, gutters: gutters)
         diagnosticCapture?.record(lines: lines)
         guard conservesFragments(positioned, in: lines) else {
             finishDiagnostics(.fallback, reason: "Line reconstruction failed exact fragment conservation.")
             return nil
         }
 
-        let simpleColumns = PdfSimpleColumnLayout.resolve(lines: lines)
-        let blocks = simpleColumns?.blocks ?? PdfLayoutBlockBuilder.build(lines: lines)
+        let columnLayout = PdfMixedRegionLayout.resolve(lines: lines) ?? PdfSimpleColumnLayout.resolve(lines: lines)
+        let blocks = columnLayout?.blocks ?? PdfLayoutBlockBuilder.build(lines: lines)
         diagnosticCapture?.record(blocks: blocks)
         guard !blocks.isEmpty else {
             finishDiagnostics(.fallback, reason: "Block reconstruction produced no readable blocks.")
@@ -118,9 +120,9 @@ enum PdfLayoutAnalyzer {
         }
 
         try checkpoint()
-        let layout = simpleColumns?.layout ?? PdfLayoutRegionDetector.segment(blocks: blocks)
-        let rawSpecial = simpleColumns?.analysis ?? PdfLayoutRoleClassifier.analyze(blocks: blocks, layout: layout)
-        let special = simpleColumns?.analysis ?? reconciledSpecialStructures(
+        let layout = columnLayout?.layout ?? PdfLayoutRegionDetector.segment(blocks: blocks)
+        let rawSpecial = columnLayout?.analysis ?? PdfLayoutRoleClassifier.analyze(blocks: blocks, layout: layout)
+        let special = columnLayout?.analysis ?? reconciledSpecialStructures(
             rawSpecial,
             assessment: assessment,
             blocks: blocks,
@@ -134,7 +136,7 @@ enum PdfLayoutAnalyzer {
             return nil
         }
 
-        let readingOrder = simpleColumns?.readingOrder ?? PdfReadingOrderResolver.resolve(
+        let readingOrder = columnLayout?.readingOrder ?? PdfReadingOrderResolver.resolve(
             blocks: blocks,
             layout: layout,
             hints: special.readingOrderHints
@@ -185,7 +187,7 @@ enum PdfLayoutAnalyzer {
             assessment: assessment,
             readingOrder: readingOrder
         )
-        finishDiagnostics(.accepted, reason: simpleColumns == nil
+        finishDiagnostics(.accepted, reason: columnLayout == nil
             ? "Layout reconstruction passed all structural, confidence, and information-safety gates."
             : "Direct persistent-gutter column ordering passed all structural and information-safety gates.")
         return result

@@ -1,9 +1,10 @@
 import Foundation
 
 enum PdfLayoutLineBuilder {
-    static func build(fragments: [PdfLayoutFragment]) -> [PdfLayoutLine] {
+    static func build(fragments: [PdfLayoutFragment], gutters: [PdfLayoutGutter]? = nil) -> [PdfLayoutLine] {
         let valid = fragments.filter(isValid)
         guard !valid.isEmpty else { return [] }
+        let gutters = gutters ?? PdfSimpleColumnLayout.fragmentGutters(valid)
 
         let medianHeight = median(valid.map { $0.rect.height })
         let ordered = valid.sorted(by: verticalSourceOrder)
@@ -35,7 +36,7 @@ enum PdfLayoutLineBuilder {
         var nextID = 0
 
         for row in rows {
-            for segment in splitAtStrongHorizontalGaps(row.fragments, medianHeight: medianHeight) {
+            for segment in splitAtStrongHorizontalGaps(row.fragments, medianHeight: medianHeight, gutters: gutters) {
                 let direction = writingDirection(for: segment)
                 let fragments = orderedWithinLine(segment, direction: direction)
                 let text = reconstructText(fragments, direction: direction)
@@ -168,7 +169,8 @@ enum PdfLayoutLineBuilder {
 
     private static func splitAtStrongHorizontalGaps(
         _ fragments: [PdfLayoutFragment],
-        medianHeight: CGFloat
+        medianHeight: CGFloat,
+        gutters: [PdfLayoutGutter]
     ) -> [[PdfLayoutFragment]] {
         guard fragments.count > 1 else { return [fragments] }
         let ordered = fragments.sorted {
@@ -195,7 +197,12 @@ enum PdfLayoutLineBuilder {
                 typographyGap
             )
 
-            if gap >= strongGap {
+            let crossesEstablishedGutter = gutters.contains {
+                lhs.rect.maxX <= $0.center && rhs.rect.minX >= $0.center
+                    && min(lhs.rect.maxY, rhs.rect.maxY) >= $0.verticalRange.lowerBound
+                    && max(lhs.rect.minY, rhs.rect.minY) <= $0.verticalRange.upperBound
+            }
+            if gap >= strongGap || crossesEstablishedGutter {
                 result.append(current)
                 current = [rhs]
             } else {

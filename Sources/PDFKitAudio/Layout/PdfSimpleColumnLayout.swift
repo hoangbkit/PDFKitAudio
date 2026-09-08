@@ -24,8 +24,12 @@ enum PdfSimpleColumnLayout {
         let readingOrder: PdfReadingOrderResult
     }
 
-    static func resolve(lines: [PdfLayoutLine]) -> Result? {
-        let gutters = persistentGutters(lines: lines)
+    static func resolve(
+        lines: [PdfLayoutLine],
+        establishedGutters: [PdfLayoutGutter]? = nil,
+        minimumLaneLineCount: Int = 2
+    ) -> Result? {
+        let gutters = establishedGutters ?? persistentGutters(lines: lines)
         guard (1...2).contains(gutters.count),
               let bodyTop = gutters.map({ $0.verticalRange.lowerBound }).min(),
               let pairedBottom = gutters.map({ $0.verticalRange.upperBound }).max() else { return nil }
@@ -89,7 +93,7 @@ enum PdfSimpleColumnLayout {
             lanes[lane].append(line)
         }
 
-        guard lanes.allSatisfy({ $0.count >= 2 }) else { return nil }
+        guard lanes.allSatisfy({ $0.count >= minimumLaneLineCount }) else { return nil }
         let counts = lanes.map(\.count)
         guard Double(counts.min()!) / Double(counts.max()!) >= 0.35 else { return nil }
         let heights = lanes.map { median($0.map { $0.rect.height }) }
@@ -103,7 +107,7 @@ enum PdfSimpleColumnLayout {
                 guard let last = $0.text.trimmingCharacters(in: .whitespacesAndNewlines).last else { return false }
                 return ".!?。！？".contains(last)
             }.count
-            return endings >= 2 && Double(endings) / Double(lane.count) >= 0.30
+            return endings >= minimumLaneLineCount && Double(endings) / Double(lane.count) >= 0.30
         }) else { return nil }
 
         let rtl = lanes.flatMap { $0 }.filter { $0.writingDirection == .rightToLeft }.count
@@ -153,7 +157,7 @@ enum PdfSimpleColumnLayout {
     /// Intersect recurring empty X intervals, rather than clustering block left
     /// edges or guessing from page-width percentages. Short last lines contribute
     /// wider intervals without moving the persistent core of a gutter.
-    static func persistentGutters(lines: [PdfLayoutLine]) -> [PdfLayoutGutter] {
+    static func persistentGutters(lines: [PdfLayoutLine], minimumRows: Int = 2) -> [PdfLayoutGutter] {
         struct Evidence {
             var minX: CGFloat
             var maxX: CGFloat
@@ -191,9 +195,16 @@ enum PdfSimpleColumnLayout {
                 }
             }
         }
-        return evidence.filter { $0.rows.count >= 2 && $0.bottom - $0.top >= 0.025 }.map {
+        return evidence.filter { $0.rows.count >= minimumRows && (minimumRows == 1 || $0.bottom - $0.top >= 0.025) }.map {
             PdfLayoutGutter(minX: $0.minX, maxX: $0.maxX, verticalRange: $0.top...$0.bottom, confidence: 0.94)
         }.sorted { $0.minX < $1.minX }
+    }
+
+    static func fragmentGutters(_ fragments: [PdfLayoutFragment]) -> [PdfLayoutGutter] {
+        persistentGutters(lines: fragments.map {
+            PdfLayoutLine(id: $0.id, fragments: [$0], text: $0.text, rect: $0.rect,
+                writingDirection: .leftToRight, sourceOrder: $0.sourceOrder)
+        })
     }
 
     private static func verticalOrder(_ lhs: PdfLayoutLine, _ rhs: PdfLayoutLine) -> Bool {

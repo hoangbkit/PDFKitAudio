@@ -5,6 +5,10 @@ enum PdfLayoutBlockBuilder {
         guard !lines.isEmpty else { return [] }
 
         let ordered = lines.sorted(by: stableGeometryOrder)
+        let gutters = PdfSimpleColumnLayout.persistentGutters(lines: ordered)
+        let barriers = ordered.filter { line in
+            gutters.contains { line.rect.minX < $0.center && line.rect.maxX > $0.center }
+        }
         let pageMedianHeight = median(ordered.map { $0.rect.height })
         let pageMedianFontSize = median(ordered.compactMap(\.medianFontSize))
         var drafts: [BlockDraft] = []
@@ -13,6 +17,8 @@ enum PdfLayoutBlockBuilder {
             if let index = bestDraftIndex(
                 for: line,
                 drafts: drafts,
+                gutters: gutters,
+                barriers: barriers,
                 pageMedianHeight: pageMedianHeight,
                 pageMedianFontSize: pageMedianFontSize
             ) {
@@ -61,6 +67,8 @@ enum PdfLayoutBlockBuilder {
     private static func bestDraftIndex(
         for line: PdfLayoutLine,
         drafts: [BlockDraft],
+        gutters: [PdfLayoutGutter],
+        barriers: [PdfLayoutLine],
         pageMedianHeight: CGFloat,
         pageMedianFontSize: CGFloat
     ) -> Int? {
@@ -68,6 +76,20 @@ enum PdfLayoutBlockBuilder {
 
         for (index, draft) in drafts.enumerated() {
             let previous = draft.lastLine
+            // Compatible alignment cannot reconnect a paragraph across an
+            // intervening spanning heading or move its continuation into a
+            // neighboring established lane.
+            if barriers.contains(where: {
+                $0.id != previous.id && $0.id != line.id
+                    && previous.rect.maxY <= $0.rect.minY + 0.001
+                    && line.rect.minY >= $0.rect.maxY - 0.001
+            }) { continue }
+            if gutters.contains(where: { gutter in
+                let oppositeLanes = (previous.rect.maxX <= gutter.center && line.rect.minX >= gutter.center)
+                    || (line.rect.maxX <= gutter.center && previous.rect.minX >= gutter.center)
+                return oppositeLanes && previous.rect.maxY >= gutter.verticalRange.lowerBound
+                    && line.rect.minY <= gutter.verticalRange.upperBound
+            }) { continue }
             guard canMerge(
                 previous: previous,
                 current: line,
