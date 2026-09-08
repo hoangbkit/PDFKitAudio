@@ -24,9 +24,25 @@ enum PdfLayoutAnalyzer {
         nativeTextThreshold: Int,
         pageIndex: Int,
         mode: PdfLayoutMode,
+        diagnostics: ((PdfLayoutDiagnostics.Snapshot) -> Void)? = nil,
         checkpoint: () throws -> Void = {}
     ) throws -> Result? {
-        guard mode != .never else { return nil }
+        var diagnosticCapture = diagnostics.map { _ in
+            PdfLayoutDiagnostics.Capture(pageIndex: pageIndex, mode: mode)
+        }
+
+        func finishDiagnostics(
+            _ decision: PdfLayoutDiagnostics.Decision,
+            reason: String
+        ) {
+            guard let diagnosticCapture else { return }
+            diagnostics?(diagnosticCapture.snapshot(decision: decision, reason: reason))
+        }
+
+        guard mode != .never else {
+            finishDiagnostics(.fastPath, reason: "Layout mode is .never; preserving legacy selected text without geometry analysis.")
+            return nil
+        }
 
         let positioned = PdfPositionedTextExtractor.deduplicated(fragments)
             .filter { fragment in
@@ -38,16 +54,27 @@ enum PdfLayoutAnalyzer {
                     && fragment.rect.width.isFinite
                     && fragment.rect.height.isFinite
             }
-        guard !positioned.isEmpty else { return nil }
-        guard uniqueIDs(positioned.map(\.id)) else { return nil }
+        diagnosticCapture?.record(fragments: positioned)
+
+        guard !positioned.isEmpty else {
+            finishDiagnostics(.fallback, reason: "No usable positioned fragments were available; preserving selected text.")
+            return nil
+        }
+        guard uniqueIDs(positioned.map(\.id)) else {
+            finishDiagnostics(.fallback, reason: "Positioned fragment identifiers were not unique; preserving selected text.")
+            return nil
+        }
 
         let assessment = PdfLayoutComplexityDetector.assess(
             fragments: positioned,
             nativeText: nativeText,
             nativeTextThreshold: nativeTextThreshold
         )
+        diagnosticCapture?.record(assessment: assessment)
+
         switch mode {
         case .never:
+            finishDiagnostics(.fastPath, reason: "Layout mode is .never; preserving legacy selected text.")
             return nil
         case .auto:
             // Keep ordinary single-column pages on the exact legacy fast path.
@@ -56,6 +83,10 @@ enum PdfLayoutAnalyzer {
             // backtrack (for example body text serialized before a title/header).
             guard assessment.shouldAnalyze
                     || shouldRepairSimpleOrder(fragments: positioned, assessment: assessment) else {
+                finishDiagnostics(
+                    .fastPath,
+                    reason: "The conservative complexity gate kept this page on the legacy selected-text fast path."
+                )
                 return nil
             }
         case .always:
@@ -64,12 +95,24 @@ enum PdfLayoutAnalyzer {
 
         try checkpoint()
         let lines = PdfLayoutLineBuilder.build(fragments: positioned)
-        guard conservesFragments(positioned, in: lines) else { return nil }
+        diagnosticCapture?.record(lines: lines)
+        guard conservesFragments(positioned, in: lines) else {
+            finishDiagnostics(.fallback, reason: "Line reconstruction failed exact fragment conservation.")
+            return nil
+        }
 
         let blocks = PdfLayoutBlockBuilder.build(lines: lines)
-        guard !blocks.isEmpty,
-              uniqueIDs(blocks.map(\.id)),
-              conservesFragments(positioned, in: blocks) else {
+        diagnosticCapture?.record(blocks: blocks)
+        guard !blocks.isEmpty else {
+            finishDiagnostics(.fallback, reason: "Block reconstruction produced no readable blocks.")
+            return nil
+        }
+        guard uniqueIDs(blocks.map(\.id)) else {
+            finishDiagnostics(.fallback, reason: "Block identifiers were not unique.")
+            return nil
+        }
+        guard conservesFragments(positioned, in: blocks) else {
+            finishDiagnostics(.fallback, reason: "Block reconstruction failed exact fragment conservation.")
             return nil
         }
 
@@ -82,8 +125,11 @@ enum PdfLayoutAnalyzer {
             blocks: blocks,
             layout: layout
         )
+        diagnosticCapture?.record(layout: layout, analysis: special)
+
         guard Set(special.assignments.map(\.blockID)) == Set(blocks.map(\.id)),
               special.assignments.count == blocks.count else {
+            finishDiagnostics(.fallback, reason: "Role classification did not annotate every reconstructed block exactly once.")
             return nil
         }
 
@@ -92,13 +138,24 @@ enum PdfLayoutAnalyzer {
             layout: layout,
             hints: special.readingOrderHints
         )
+        diagnosticCapture?.record(readingOrder: readingOrder)
         try checkpoint()
 
         let blockIDs = Set(blocks.map(\.id))
-        guard !readingOrder.usedFallback,
-              readingOrder.confidence >= minimumReadingOrderConfidence,
-              readingOrder.orderedBlockIDs.count == blocks.count,
+        guard !readingOrder.usedFallback else {
+            finishDiagnostics(.fallback, reason: "Reading-order resolver used its geometric safety fallback.")
+            return nil
+        }
+        guard readingOrder.confidence >= minimumReadingOrderConfidence else {
+            finishDiagnostics(
+                .fallback,
+                reason: "Reading-order confidence \(readingOrder.confidence) was below the acceptance threshold \(minimumReadingOrderConfidence)."
+            )
+            return nil
+        }
+        guard readingOrder.orderedBlockIDs.count == blocks.count,
               Set(readingOrder.orderedBlockIDs) == blockIDs else {
+            finishDiagnostics(.fallback, reason: "Reading-order resolution did not conserve every block exactly once.")
             return nil
         }
 
@@ -112,6 +169,7 @@ enum PdfLayoutAnalyzer {
             fragments: positioned,
             blocks: blocks
         ) else {
+            finishDiagnostics(.fallback, reason: "Analyzed output failed non-empty/information-ratio safety checks.")
             return nil
         }
 
@@ -120,12 +178,14 @@ enum PdfLayoutAnalyzer {
             blocks: blocks,
             analysis: special
         )
-        return Result(
+        let result = Result(
             text: analyzedText,
             fingerprints: fingerprints,
             assessment: assessment,
             readingOrder: readingOrder
         )
+        finishDiagnostics(.accepted, reason: "Layout reconstruction passed all structural, confidence, and information-safety gates.")
+        return result
     }
 
     /// True only for a high-confidence single-column page whose source order has
