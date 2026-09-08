@@ -13,12 +13,21 @@ enum PdfPositionedTextExtractor {
         }
 
         let lineSelections = selection.selectionsByLine()
+        let usesPersistentGlyphGutters = shouldUsePersistentGlyphGapSplitting(
+            lineSelections: lineSelections,
+            page: page
+        )
+
         var fragments: [PdfLayoutFragment] = []
         fragments.reserveCapacity(lineSelections.count)
         var sourceOrder = 0
 
         for lineSelection in lineSelections {
-            let subselections = nativeSubselections(for: lineSelection, page: page)
+            let subselections = nativeSubselections(
+                for: lineSelection,
+                page: page,
+                usesPersistentGlyphGutters: usesPersistentGlyphGutters
+            )
             for subsection in subselections {
                 guard let rawText = subsection.string else { continue }
                 let text = rawText.trimmingCharacters(in: .newlines)
@@ -45,24 +54,24 @@ enum PdfPositionedTextExtractor {
     }
 
     /// `PDFSelection.selectionsByLine()` can legally return one selection for
-    /// text that shares a visual baseline across separate columns. Keep the
-    /// normal line-level fast path, but split a suspiciously stretched selection
-    /// when its character geometry contains a strong interior gap.
+    /// text that shares a visual baseline across separate columns. The first
+    /// implementation tried to identify those lines from the selection's total
+    /// width versus its attributed-string width. Real PDFs can serialize both
+    /// columns into one line whose intrinsic text width is also large, which makes
+    /// that comparison miss exactly the case we need to repair.
+    ///
+    /// Phase 1 correctness recovery therefore probes a small, deterministic sample
+    /// of wide line selections using PDFPage character bounds. If the same strong
+    /// interior X gap recurs across sampled lines, the page has evidence of a real
+    /// column gutter and all sufficiently wide lines are allowed to split at glyph
+    /// gaps. Ordinary single-column pages pay only for the small probe and stay on
+    /// the original line-level fast path when no persistent gutter exists.
     private static func nativeSubselections(
         for lineSelection: PDFSelection,
-        page: PDFPage
+        page: PDFPage,
+        usesPersistentGlyphGutters: Bool
     ) -> [PDFSelection] {
-        let textRangeCount = lineSelection.numberOfTextRanges(on: page)
-        guard textRangeCount > 0 else { return [lineSelection] }
-
-        var ranges: [NSRange] = []
-        ranges.reserveCapacity(textRangeCount)
-        for index in 0..<textRangeCount {
-            let range = lineSelection.range(at: index, on: page)
-            if range.location != NSNotFound, range.length > 0 {
-                ranges.append(range)
-            }
-        }
+        let ranges = textRanges(in: lineSelection, page: page)
         guard !ranges.isEmpty else { return [lineSelection] }
 
         // Noncontiguous PDFSelection ranges are already the most faithful cheap
@@ -74,10 +83,11 @@ enum PdfPositionedTextExtractor {
             }
         }
 
-        guard ranges.count == 1,
-              shouldInspectCharacterGeometry(lineSelection, page: page) else {
-            return [lineSelection]
-        }
+        guard ranges.count == 1 else { return [lineSelection] }
+        let shouldInspect = usesPersistentGlyphGutters
+            ? isWideColumnSplitCandidate(lineSelection, page: page)
+            : shouldInspectCharacterGeometry(lineSelection, page: page)
+        guard shouldInspect else { return [lineSelection] }
 
         let splitRanges = rangesSplitAtStrongGlyphGaps(ranges[0], page: page)
         guard splitRanges.count > 1 else { return [lineSelection] }
@@ -85,9 +95,102 @@ enum PdfPositionedTextExtractor {
         return selections.count == splitRanges.count ? selections : [lineSelection]
     }
 
-    /// Character geometry is substantially more expensive than line geometry,
-    /// so only inspect lines whose visual span is meaningfully wider than the
-    /// same attributed text laid out without a large interior gap.
+    private struct GapCluster {
+        var center: CGFloat
+        var count: Int
+
+        mutating func append(_ x: CGFloat) {
+            center = ((center * CGFloat(count)) + x) / CGFloat(count + 1)
+            count += 1
+        }
+    }
+
+    private static func shouldUsePersistentGlyphGapSplitting(
+        lineSelections: [PDFSelection],
+        page: PDFPage
+    ) -> Bool {
+        let pageBounds = page.bounds(for: .mediaBox).standardized
+        guard pageBounds.width > 0, lineSelections.count >= 2 else { return false }
+
+        let candidateRanges = lineSelections.compactMap { selection -> NSRange? in
+            let bounds = selection.bounds(for: page).standardized
+            guard bounds.width >= pageBounds.width * 0.46 else { return nil }
+            let ranges = textRanges(in: selection, page: page)
+            guard ranges.count == 1,
+                  ranges[0].length >= 8 else {
+                return nil
+            }
+            return ranges[0]
+        }
+        guard candidateRanges.count >= 2 else { return false }
+
+        let samples = evenlySampled(candidateRanges, maximumCount: 5)
+        var clusters: [GapCluster] = []
+        let clusterTolerance: CGFloat = 0.055
+
+        for range in samples {
+            for center in strongGlyphGapCenters(in: range, page: page) {
+                if let index = clusters.indices.min(by: {
+                    abs(clusters[$0].center - center) < abs(clusters[$1].center - center)
+                }), abs(clusters[index].center - center) <= clusterTolerance {
+                    clusters[index].append(center)
+                } else {
+                    clusters.append(GapCluster(center: center, count: 1))
+                }
+            }
+        }
+
+        // A single large tab/callout gap is not enough to classify a page as
+        // columnar. The same gutter must recur in at least two sampled lines.
+        return clusters.contains { $0.count >= 2 }
+    }
+
+    private static func evenlySampled<T>(
+        _ values: [T],
+        maximumCount: Int
+    ) -> [T] {
+        guard maximumCount > 0, values.count > maximumCount else { return values }
+        guard maximumCount > 1 else { return [values[values.count / 2]] }
+
+        let last = values.count - 1
+        var indexes: Set<Int> = []
+        for slot in 0..<maximumCount {
+            let ratio = Double(slot) / Double(maximumCount - 1)
+            indexes.insert(Int((Double(last) * ratio).rounded()))
+        }
+        return indexes.sorted().map { values[$0] }
+    }
+
+    private static func textRanges(
+        in selection: PDFSelection,
+        page: PDFPage
+    ) -> [NSRange] {
+        let count = selection.numberOfTextRanges(on: page)
+        guard count > 0 else { return [] }
+        var ranges: [NSRange] = []
+        ranges.reserveCapacity(count)
+        for index in 0..<count {
+            let range = selection.range(at: index, on: page)
+            if range.location != NSNotFound, range.length > 0 {
+                ranges.append(range)
+            }
+        }
+        return ranges
+    }
+
+    private static func isWideColumnSplitCandidate(
+        _ selection: PDFSelection,
+        page: PDFPage
+    ) -> Bool {
+        let bounds = selection.bounds(for: page).standardized
+        let pageBounds = page.bounds(for: .mediaBox).standardized
+        return bounds.width > 0
+            && pageBounds.width > 0
+            && bounds.width >= pageBounds.width * 0.34
+    }
+
+    /// Keep the original isolated-line repair as a fallback for pages that do not
+    /// expose a recurring gutter. This remains intentionally conservative.
     private static func shouldInspectCharacterGeometry(
         _ selection: PDFSelection,
         page: PDFPage
@@ -107,10 +210,6 @@ enum PdfPositionedTextExtractor {
             options: [.usesLineFragmentOrigin, .usesFontLeading]
         ).standardized
         guard naturalBounds.width > 0 else { return false }
-
-        // The threshold is deliberately conservative. Ordinary justified/wide
-        // prose stays line-level; a merged pair of columns usually includes a
-        // physical gutter far larger than the intrinsic text spacing.
         return bounds.width >= naturalBounds.width * 1.18
     }
 
@@ -119,53 +218,93 @@ enum PdfPositionedTextExtractor {
         let rect: CGRect
     }
 
+    private static func nativeGlyphs(
+        in range: NSRange,
+        page: PDFPage
+    ) -> [NativeGlyph] {
+        guard range.location != NSNotFound, range.length > 0 else { return [] }
+        let upperBound = range.location + range.length
+        guard upperBound <= page.numberOfCharacters else { return [] }
+
+        let pageText = page.string.map { $0 as NSString }
+        var glyphs: [NativeGlyph] = []
+        glyphs.reserveCapacity(range.length)
+
+        for characterIndex in range.location..<upperBound {
+            if let pageText, characterIndex < pageText.length {
+                let unit = pageText.substring(
+                    with: NSRange(location: characterIndex, length: 1)
+                )
+                if unit.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    continue
+                }
+            }
+
+            let rawBounds = page.characterBounds(at: characterIndex)
+            let rect = PdfLayoutGeometry.normalizedPageRect(rawBounds, page: page)
+            guard rect.width > 0, rect.height > 0 else { continue }
+            glyphs.append(NativeGlyph(characterIndex: characterIndex, rect: rect))
+        }
+        return glyphs
+    }
+
+    private static func strongGlyphGapThreshold(_ glyphs: [NativeGlyph]) -> CGFloat {
+        guard !glyphs.isEmpty else { return .greatestFiniteMagnitude }
+        let glyphWidths = glyphs.map(\.rect.width).sorted()
+        let medianGlyphWidth = glyphWidths[glyphWidths.count / 2]
+
+        // Normal word spacing is well below this threshold. The lower bound still
+        // catches practical narrow newspaper gutters while the upper bound avoids
+        // letting unusually wide glyphs make real gutters invisible.
+        return max(0.024, min(0.060, medianGlyphWidth * 4.0))
+    }
+
+    private static func horizontalGap(
+        between lhs: CGRect,
+        and rhs: CGRect
+    ) -> CGFloat {
+        if lhs.maxX < rhs.minX { return rhs.minX - lhs.maxX }
+        if rhs.maxX < lhs.minX { return lhs.minX - rhs.maxX }
+        return 0
+    }
+
+    private static func strongGlyphGapCenters(
+        in range: NSRange,
+        page: PDFPage
+    ) -> [CGFloat] {
+        let glyphs = nativeGlyphs(in: range, page: page)
+        guard glyphs.count >= 2 else { return [] }
+        let threshold = strongGlyphGapThreshold(glyphs)
+        var centers: [CGFloat] = []
+
+        for index in 1..<glyphs.count {
+            let lhs = glyphs[index - 1].rect
+            let rhs = glyphs[index].rect
+            let gap = horizontalGap(between: lhs, and: rhs)
+            guard gap >= threshold else { continue }
+
+            let leftEdge = min(lhs.maxX, rhs.maxX)
+            let rightEdge = max(lhs.minX, rhs.minX)
+            centers.append((leftEdge + rightEdge) / 2)
+        }
+        return centers
+    }
+
     private static func rangesSplitAtStrongGlyphGaps(
         _ range: NSRange,
         page: PDFPage
     ) -> [NSRange] {
         guard range.location != NSNotFound, range.length > 1 else { return [range] }
-        let upperBound = range.location + range.length
-        guard upperBound <= page.numberOfCharacters else { return [range] }
-
-        var glyphs: [NativeGlyph] = []
-        glyphs.reserveCapacity(range.length)
-
-        for characterIndex in range.location..<upperBound {
-            guard let selection = page.selection(
-                for: NSRange(location: characterIndex, length: 1)
-            ), let text = selection.string,
-               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                continue
-            }
-
-            let rect = PdfLayoutGeometry.normalizedPageRect(
-                selection.bounds(for: page),
-                page: page
-            )
-            guard rect.width > 0, rect.height > 0 else { continue }
-            glyphs.append(NativeGlyph(characterIndex: characterIndex, rect: rect))
-        }
-
+        let glyphs = nativeGlyphs(in: range, page: page)
         guard glyphs.count >= 2 else { return [range] }
-        let glyphWidths = glyphs.map(\.rect.width).sorted()
-        let medianGlyphWidth = glyphWidths[glyphWidths.count / 2]
-        let strongGap = max(0.040, medianGlyphWidth * 6.0)
+        let strongGap = strongGlyphGapThreshold(glyphs)
 
         var result: [NSRange] = []
         var groupStart = glyphs[0].characterIndex
         var previous = glyphs[0]
 
         for glyph in glyphs.dropFirst() {
-            let horizontalGap: CGFloat
-            if previous.rect.maxX < glyph.rect.minX {
-                horizontalGap = glyph.rect.minX - previous.rect.maxX
-            } else if glyph.rect.maxX < previous.rect.minX {
-                horizontalGap = previous.rect.minX - glyph.rect.maxX
-            } else {
-                horizontalGap = 0
-            }
-
-            if horizontalGap >= strongGap {
+            if horizontalGap(between: previous.rect, and: glyph.rect) >= strongGap {
                 let length = previous.characterIndex - groupStart + 1
                 if length > 0 {
                     result.append(NSRange(location: groupStart, length: length))
