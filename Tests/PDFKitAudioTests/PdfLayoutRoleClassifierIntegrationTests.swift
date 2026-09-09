@@ -65,6 +65,10 @@ final class PdfLayoutRoleClassifierIntegrationTests: XCTestCase {
         let blocks = PdfLayoutBlockBuilder.build(lines: lines)
         let layout = PdfLayoutRegionDetector.segment(blocks: blocks)
         let analysis = PdfLayoutRoleClassifier.analyze(blocks: blocks, layout: layout)
+        if ProcessInfo.processInfo.environment["PDFKITAUDIO_LAYOUT_DIAGNOSTICS"] == "1" {
+            print("FIXTURE \(fixture.name)")
+            for fragment in fragments { print("CELL \(fragment.text) \(fragment.rect)") }
+        }
 
         XCTAssertFalse(fragments.isEmpty)
         XCTAssertFalse(blocks.isEmpty)

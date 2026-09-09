@@ -331,7 +331,7 @@ enum PdfLayoutAnalyzer {
         return ascending || descending
     }
 
-    private static func materialize(
+    static func materialize(
         blocks: [PdfLayoutBlock],
         orderedBlockIDs: [Int],
         analysis: PdfSpecialStructureAnalysis
@@ -346,10 +346,14 @@ enum PdfLayoutAnalyzer {
                 return lhs.offset < rhs.offset
             }
 
-        var tableIndexByBlockID: [Int: Int] = [:]
+        var tableIndexByFragmentID: [Int: Int] = [:]
         for pair in rankedTables {
-            for blockID in pair.element.blockIDs where tableIndexByBlockID[blockID] == nil {
-                tableIndexByBlockID[blockID] = pair.offset
+            for cell in pair.element.cellsByRow.flatMap({ $0 }) {
+                guard let block = blockByID[cell.blockID],
+                      let line = block.lines.first(where: { $0.id == cell.lineID }),
+                      let fragment = line.fragments.first(where: { $0.text == cell.text && $0.rect == cell.rect }),
+                      tableIndexByFragmentID[fragment.id] == nil else { continue }
+                tableIndexByFragmentID[fragment.id] = pair.offset
             }
         }
 
@@ -358,19 +362,29 @@ enum PdfLayoutAnalyzer {
         parts.reserveCapacity(orderedBlockIDs.count)
 
         for blockID in orderedBlockIDs {
-            if let tableIndex = tableIndexByBlockID[blockID],
-               analysis.tables.indices.contains(tableIndex) {
-                if emittedTables.insert(tableIndex).inserted {
-                    let tableText = analysis.tables[tableIndex].linearizedText
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !tableText.isEmpty {
-                        parts.append(tableText)
+            guard let block = blockByID[blockID] else { continue }
+            let fragments = block.lines.flatMap(\.fragments)
+            if fragments.contains(where: { tableIndexByFragmentID[$0.id] != nil }) {
+                // Table membership does not consume the rest of a paragraph.
+                // Emit only matched cells through the table linearizer; retain
+                // prose and unmatched/incomplete rows from the same block.
+                var residual: [String] = []
+                for fragment in fragments {
+                    if let tableIndex = tableIndexByFragmentID[fragment.id] {
+                        if !residual.isEmpty {
+                            parts.append(residual.joined(separator: "\n")); residual.removeAll()
+                        }
+                        if emittedTables.insert(tableIndex).inserted {
+                            parts.append(analysis.tables[tableIndex].linearizedText)
+                        }
+                    } else {
+                        residual.append(fragment.text.trimmingCharacters(in: .whitespacesAndNewlines))
                     }
                 }
+                if !residual.isEmpty { parts.append(residual.joined(separator: "\n")) }
                 continue
             }
 
-            guard let block = blockByID[blockID] else { continue }
             let text = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !text.isEmpty {
                 parts.append(text)
@@ -399,6 +413,12 @@ enum PdfLayoutAnalyzer {
             fragments.map(\.text).joined(separator: "\n")
         )
         let outputInformation = informativeCharacterCount(output)
+        func characterInventory(_ text: String) -> [Unicode.Scalar: Int] {
+            text.unicodeScalars.reduce(into: [:]) { counts, scalar in
+                if CharacterSet.alphanumerics.contains(scalar) { counts[scalar, default: 0] += 1 }
+            }
+        }
+        guard characterInventory(output) == characterInventory(fragments.map(\.text).joined()) else { return false }
         if sourceInformation > 0 {
             let ratio = Double(outputInformation) / Double(sourceInformation)
             guard ratio >= minimumInformationRatio,

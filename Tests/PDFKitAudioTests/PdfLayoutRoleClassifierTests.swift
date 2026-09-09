@@ -4,6 +4,63 @@ import XCTest
 @testable import PDFKitAudio
 
 final class PdfLayoutRoleClassifierTests: XCTestCase {
+    func testHeaderDetectionDoesNotInferLabelsFromSubstrings() throws {
+        let strings = ["Surname", "Updated", "Totals", "Alice", "Yesterday", "42"]
+        let blocks = strings.enumerated().map { index, text in
+            block(index, text: text, x: 0.10 + CGFloat(index % 3) * 0.30,
+                y: 0.20 + CGFloat(index / 3) * 0.10, width: 0.17, height: 0.025, font: 10)
+        }
+        XCTAssertNil(try XCTUnwrap(analyze(blocks).tables.first).headerRowIndex)
+        let boldHeaders = blocks.enumerated().map { index, original in
+            block(index, text: original.text, x: original.rect.minX, y: original.rect.minY,
+                width: 0.17, height: 0.025, font: 10, bold: index < 3)
+        }
+        XCTAssertEqual(try XCTUnwrap(analyze(boldHeaders).tables.first).headerRowIndex, 0)
+    }
+
+    func testSmallCenteredTextWithoutPrefixIsNotACaption() {
+        let blocks = [block(0, text: "Primary narrative", x: 0.10, y: 0.12),
+                      block(1, text: "More narrative", x: 0.10, y: 0.30),
+                      block(2, text: "An ordinary centered remark", x: 0.35, y: 0.62, width: 0.30, font: 9)]
+        let result = analyze(blocks)
+        XCTAssertNotEqual(result.role(for: 2), .caption)
+        XCTAssertFalse(result.readingOrderHints.captionAttachments.contains { $0.blockID == 2 })
+    }
+
+    func testCaptionCannotAttachAcrossAnUnrelatedColumn() {
+        let blocks = [block(0, text: "Left column narrative", x: 0.08, y: 0.40, width: 0.30),
+                      block(1, text: "Right column narrative", x: 0.65, y: 0.57, width: 0.30),
+                      block(2, text: "Figure 1. Left illustration", x: 0.08, y: 0.63, width: 0.30, font: 8)]
+        let result = analyze(blocks)
+        XCTAssertEqual(result.role(for: 2), .caption)
+        XCTAssertEqual(result.readingOrderHints.captionAttachments.first?.anchorBlockID, 0)
+    }
+
+    func testNumberedSmallBottomNoteTakesPriorityOverListMarker() {
+        let result = analyze([block(0, text: "Main narrative", x: 0.12, y: 0.12),
+                              block(1, text: "More narrative", x: 0.12, y: 0.32),
+                              block(2, text: "1. A referenced footnote", x: 0.12, y: 0.82, font: 8)])
+        XCTAssertEqual(result.role(for: 2), .footnote)
+        XCTAssertEqual(result.readingOrderHints.footnoteBlockIDs, [2])
+    }
+
+    func testTableMaterializationDoesNotConsumeUnmatchedTextInSameBlock() {
+        let source = ["Introduction", "Cell A", "Cell B", "Unmatched row", "Conclusion"]
+            .enumerated().map { block($0.offset, text: $0.element, x: 0.10, y: CGFloat($0.offset) * 0.10) }
+        let lines = source.flatMap(\.lines)
+        let combined = PdfLayoutBlock(id: 0, lines: lines, text: source.map(\.text).joined(separator: "\n"),
+            rect: CGRect(x: 0.10, y: 0, width: 0.60, height: 0.45), sourceOrder: 0)
+        let cells = [1, 2].map { index in
+            PdfTableCell(blockID: 0, lineID: lines[index].id, text: lines[index].text, rect: lines[index].rect)
+        }
+        let table = PdfDetectedTable(cellsByRow: [cells], columnCount: 2, headerRowIndex: nil,
+            confidence: 0.95, linearizedText: "Cell A. Cell B.")
+        let analysis = PdfSpecialStructureAnalysis(assignments: [.init(blockID: 0, role: .tableCell, confidence: 0.95)],
+            tables: [table], readingOrderHints: .init())
+        XCTAssertEqual(PdfLayoutAnalyzer.materialize(blocks: [combined], orderedBlockIDs: [0], analysis: analysis),
+            "Introduction\n\nCell A. Cell B.\n\nUnmatched row\nConclusion")
+    }
+
     func testHeadingUsesRelativeStyleAndWhitespaceSignals() {
         let pipeline = pipelineForFixture(named: "short-chapter-heading-body")
         let analysis = analyze(pipeline.blocks)

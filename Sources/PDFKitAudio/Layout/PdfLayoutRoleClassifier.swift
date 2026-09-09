@@ -27,13 +27,18 @@ enum PdfLayoutRoleClassifier {
                 assignments.append(.init(blockID: block.id, role: .sidebar, confidence: 0.96, signals: ["Phase 4 sparse side-lane assignment"]))
                 continue
             }
+            let footnote = footnoteScore(block, blocks: valid, medianFont: pageMedianFont, bottomSmallCount: bottomSmallCount, hasBottomRule: hasBottomRule)
+            if footnote.score >= 0.72 {
+                assignments.append(.init(blockID: block.id, role: .footnote, confidence: footnote.score, signals: footnote.signals)); continue
+            }
+
             if beginsListItem(block.text) {
                 assignments.append(.init(blockID: block.id, role: .listItem, confidence: 0.96, signals: ["explicit list marker"])); continue
             }
 
-            let footnote = footnoteScore(block, blocks: valid, medianFont: pageMedianFont, bottomSmallCount: bottomSmallCount, hasBottomRule: hasBottomRule)
-            if footnote.score >= 0.72 {
-                assignments.append(.init(blockID: block.id, role: .footnote, confidence: footnote.score, signals: footnote.signals)); continue
+            if isIsolatedInteriorCallout(block, blocks: valid) {
+                assignments.append(.init(blockID: block.id, role: .pullQuote, confidence: 0.94,
+                    signals: ["isolated inset between aligned narrative blocks"])); continue
             }
 
             let heading = headingScore(block, blocks: valid, medianFont: pageMedianFont)
@@ -72,6 +77,7 @@ enum PdfLayoutRoleClassifier {
             tables: tables,
             readingOrderHints: PdfReadingOrderHints(
                 footnoteBlockIDs: footnoteIDs,
+                pullQuoteBlockIDs: Set(assignments.filter { $0.role == .pullQuote }.map(\.blockID)),
                 captionAttachments: captionAttachments,
                 additionalPrecedence: headingEdges,
                 unknownBlockIDs: []
@@ -104,6 +110,7 @@ enum PdfLayoutRoleClassifier {
         let font = blockFontSize(block) ?? 0
         let lower = block.text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let explicit = lower.hasPrefix("figure ") || lower.hasPrefix("fig. ") || lower.hasPrefix("table ") || lower.hasPrefix("caption ")
+        guard explicit else { return s }
         if explicit { s.add(0.40, "explicit caption prefix") }
         if medianFont > 0 && font > 0 && font <= medianFont * 0.84 { s.add(0.30, "smaller than body") }
         if semanticCount(block.text) <= 140 { s.add(0.10, "caption-length text") }
@@ -123,8 +130,34 @@ enum PdfLayoutRoleClassifier {
         return s.final
     }
 
+    private static func isIsolatedInteriorCallout(_ block: PdfLayoutBlock, blocks: [PdfLayoutBlock]) -> Bool {
+        guard block.lines.count <= 2, block.rect.width <= 0.38,
+              abs(block.rect.midX - 0.5) <= 0.15 else { return false }
+        let narrative = blocks.filter { $0.id != block.id && $0.lines.count >= 3 }
+        return narrative.contains { before in
+            before.rect.maxY + 0.02 < block.rect.minY && narrative.contains { after in
+                after.rect.minY > block.rect.maxY + 0.02
+                    && abs(before.rect.minX - after.rect.minX) <= 0.025
+                    && block.rect.minX > max(before.rect.minX, after.rect.minX) + 0.10
+            }
+        }
+    }
+
     private static func footnoteScore(_ block: PdfLayoutBlock, blocks: [PdfLayoutBlock], medianFont: CGFloat, bottomSmallCount: Int, hasBottomRule: Bool) -> Score {
         var s = Score(score: 0.02)
+        // Explicit note sections can begin above the bottom margin on a short
+        // page; require a separated label, a reference marker and smaller type.
+        let noteHeading = blocks.first {
+            ["footnotes", "notes"].contains($0.text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+                && $0.rect.maxY < block.rect.minY
+                && surroundingWhitespace($0, blocks: blocks).before >= 0.05
+        }
+        let precedingBodyFonts = blocks.filter { $0.rect.maxY < (noteHeading?.rect.minY ?? 0) }
+            .flatMap { $0.lines.compactMap(\.medianFontSize) }
+        if noteHeading != nil, beginsReferenceMarker(block.text),
+           let font = blockFontSize(block), font <= median(precedingBodyFonts) * 0.80 {
+            return Score(score: 0.94, signals: ["reference-marked small text after separated note heading"])
+        }
         guard block.rect.minY >= 0.70 else { return s }
         let font = blockFontSize(block) ?? 0
         s.add(0.24, "bottom page zone")
@@ -168,7 +201,8 @@ enum PdfLayoutRoleClassifier {
         guard alignment >= 0.68 else { return [] }
 
         let headerIndex = detectHeaderRow(stableRows, blocks: blocks)
-        let linearized = PdfTableLinearizer.linearize(rows: stableRows, headerRowIndex: headerIndex)
+        // Default speech conserves every source cell once, including headers.
+        let linearized = PdfTableLinearizer.linearize(rows: stableRows, headerRowIndex: nil)
         let base = phase2Table ? assessment.confidence : 0.78
         let confidence = min(0.97, max(0.72, base * 0.70 + alignment * 0.30))
         return [PdfDetectedTable(cellsByRow: stableRows, columnCount: columnCount, headerRowIndex: headerIndex, confidence: confidence, linearizedText: linearized)]
@@ -200,16 +234,18 @@ enum PdfLayoutRoleClassifier {
         let boldCount = first.filter { lineBold[$0.lineID] == true }.count
         if boldCount == first.count { return 0 }
 
+        let labels: Set<String> = ["name", "revenue", "growth", "date", "total", "amount", "metric", "base", "new", "delta"]
         let vocabularyCount = first.filter { cell in
-            let lower = cell.text.lowercased()
-            return lower.contains("name") || lower.contains("revenue") || lower.contains("growth") || lower.contains("date") || lower.contains("total") || lower.contains("amount")
+            let words = cell.text.lowercased().split(whereSeparator: { !$0.isLetter }).map(String.init)
+            return words.count <= 3 && !labels.isDisjoint(with: words)
         }.count
-        return vocabularyCount * 2 >= first.count ? 0 : nil
+        return vocabularyCount >= 2 && vocabularyCount * 5 >= first.count * 4 ? 0 : nil
     }
 
     private static func nearestCaptionAnchor(to caption: PdfLayoutBlock, blocks: [PdfLayoutBlock], roles: [Int: PdfLayoutRoleAssignment]) -> PdfLayoutBlock? {
         blocks.filter {
             $0.id != caption.id && roles[$0.id]?.role != .caption && roles[$0.id]?.role != .footnote && roles[$0.id]?.role != .sidebar
+                && min($0.rect.maxX, caption.rect.maxX) > max($0.rect.minX, caption.rect.minX)
         }.min { captionDistance(caption, $0) < captionDistance(caption, $1) }
     }
 

@@ -111,6 +111,26 @@ enum PdfReadingOrderResolver {
             validIDs: allIDs,
             edges: &graphEdges
         )
+        // Move callouts to the end of their enclosing narrative region before
+        // adding semantic edges. Remove their geometric links to avoid cycles.
+        for quoteID in hints.pullQuoteBlockIDs.intersection(allIDs) {
+            guard let quote = blockByID[quoteID] else { continue }
+            let enclosing = layout.regions.filter {
+                $0.rect.minY <= quote.rect.midY && $0.rect.maxY >= quote.rect.midY
+            }
+            var primaryIDs = Set(enclosing.flatMap(\.primaryBlockIDs))
+            // A vertically isolated quote can itself be a region. In that case
+            // the page's narrative is the conservative enclosing region.
+            if primaryIDs.subtracting(hints.pullQuoteBlockIDs).isEmpty {
+                primaryIDs = allIDs
+            }
+            primaryIDs.subtract(hints.pullQuoteBlockIDs)
+            primaryIDs.subtract(hints.footnoteBlockIDs)
+            graphEdges.removeAll { $0.fromBlockID == quoteID || $0.toBlockID == quoteID }
+            for bodyID in primaryIDs {
+                graphEdges.append(edge(from: bodyID, to: quoteID, confidence: 0.98, reason: .sidebarAttachment))
+            }
+        }
         for hint in hints.additionalPrecedence where
             hint.fromBlockID != hint.toBlockID
                 && allIDs.contains(hint.fromBlockID)

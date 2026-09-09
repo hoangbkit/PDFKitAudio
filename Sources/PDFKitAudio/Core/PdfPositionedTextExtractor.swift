@@ -48,7 +48,13 @@ enum PdfPositionedTextExtractor {
         }
 
         let lineSelections = selection.selectionsByLine()
-        let gutters = persistentGlyphGutters(
+        let selectionFragments = lineSelections.enumerated().compactMap { index, selection -> PdfLayoutFragment? in
+            guard let text = selection.string else { return nil }
+            return PdfLayoutFragment(id: index, text: text,
+                rect: PdfLayoutGeometry.normalizedPageRect(selection.bounds(for: page), page: page),
+                source: .native, confidence: 1, sourceOrder: index)
+        }
+        let gutters = PdfSimpleColumnLayout.fragmentGutters(selectionFragments) + persistentGlyphGutters(
             lineSelections: lineSelections,
             page: page
         )
@@ -129,8 +135,11 @@ enum PdfPositionedTextExtractor {
         // Noncontiguous PDFSelection ranges are already the most faithful cheap
         // subdivision PDFKit exposes; preserve them as separate fragments.
         if ranges.count > 1 {
-            let selections = ranges.compactMap { page.selection(for: $0) }
-            if selections.count == ranges.count {
+            // A disjoint range can still contain multiple table cells. Do not
+            // stop subdivision at the first PDFKit range boundary.
+            let splitRanges = ranges.flatMap { rangesSplitAtStrongGlyphGaps($0, page: page) }
+            let selections = splitRanges.compactMap { page.selection(for: $0) }
+            if selections.count == splitRanges.count {
                 return selections
             }
         }
@@ -139,7 +148,6 @@ enum PdfPositionedTextExtractor {
         let rect = PdfLayoutGeometry.normalizedPageRect(lineSelection.bounds(for: page), page: page)
         let crossesGutter = gutters.contains {
             rect.minX < $0.center && rect.maxX > $0.center
-                && rect.maxY >= $0.verticalRange.lowerBound && rect.minY <= $0.verticalRange.upperBound
         }
         let shouldInspect = crossesGutter || shouldInspectCharacterGeometry(lineSelection, page: page)
         guard shouldInspect else { return [lineSelection] }
@@ -260,21 +268,17 @@ enum PdfPositionedTextExtractor {
         let upperBound = range.location + range.length
         guard upperBound <= page.numberOfCharacters else { return [] }
 
-        let pageText = page.string.map { $0 as NSString }
         var glyphs: [NativeGlyph] = []
         glyphs.reserveCapacity(range.length)
 
         for characterIndex in range.location..<upperBound {
-            if let pageText, characterIndex < pageText.length {
-                let unit = pageText.substring(
-                    with: NSRange(location: characterIndex, length: 1)
-                )
-                if unit.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    continue
-                }
-            }
-
-            let rawBounds = page.characterBounds(at: characterIndex)
+            // PDFKit characterBounds indexes can diverge from selection/string
+            // UTF-16 indexes at synthesized spaces/newlines. Keep geometry in
+            // the same coordinate system as the ranges we will split.
+            guard let selection = page.selection(for: NSRange(location: characterIndex, length: 1)),
+                  let unit = selection.string,
+                  !unit.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            let rawBounds = selection.bounds(for: page)
             let rect = PdfLayoutGeometry.normalizedPageRect(rawBounds, page: page)
             guard rect.width > 0, rect.height > 0 else { continue }
             glyphs.append(NativeGlyph(characterIndex: characterIndex, rect: rect))
@@ -336,12 +340,12 @@ enum PdfPositionedTextExtractor {
         let strongGap = strongGlyphGapThreshold(glyphs)
 
         var result: [NSRange] = []
-        var groupStart = glyphs[0].characterIndex
+        var groupStart = range.location
         var previous = glyphs[0]
 
         for glyph in glyphs.dropFirst() {
             if horizontalGap(between: previous.rect, and: glyph.rect) >= strongGap {
-                let length = previous.characterIndex - groupStart + 1
+                let length = glyph.characterIndex - groupStart
                 if length > 0 {
                     result.append(NSRange(location: groupStart, length: length))
                 }
@@ -350,7 +354,7 @@ enum PdfPositionedTextExtractor {
             previous = glyph
         }
 
-        let finalLength = previous.characterIndex - groupStart + 1
+        let finalLength = NSMaxRange(range) - groupStart
         if finalLength > 0 {
             result.append(NSRange(location: groupStart, length: finalLength))
         }

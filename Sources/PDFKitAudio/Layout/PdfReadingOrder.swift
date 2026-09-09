@@ -38,6 +38,7 @@ struct PdfReadingOrderHints: Equatable {
     var writingDirection: PdfLayoutWritingDirection?
     var sidebarPolicy: PdfSidebarReadingPolicy
     var footnoteBlockIDs: Set<Int>
+    var pullQuoteBlockIDs: Set<Int>
     var captionAttachments: [PdfReadingOrderAttachment]
     var additionalPrecedence: [PdfReadingOrderEdge]
     var unknownBlockIDs: Set<Int>
@@ -46,6 +47,7 @@ struct PdfReadingOrderHints: Equatable {
         writingDirection: PdfLayoutWritingDirection? = nil,
         sidebarPolicy: PdfSidebarReadingPolicy = .afterPrimaryRegion,
         footnoteBlockIDs: Set<Int> = [],
+        pullQuoteBlockIDs: Set<Int> = [],
         captionAttachments: [PdfReadingOrderAttachment] = [],
         additionalPrecedence: [PdfReadingOrderEdge] = [],
         unknownBlockIDs: Set<Int> = []
@@ -53,6 +55,7 @@ struct PdfReadingOrderHints: Equatable {
         self.writingDirection = writingDirection
         self.sidebarPolicy = sidebarPolicy
         self.footnoteBlockIDs = footnoteBlockIDs
+        self.pullQuoteBlockIDs = pullQuoteBlockIDs
         self.captionAttachments = captionAttachments
         self.additionalPrecedence = additionalPrecedence
         self.unknownBlockIDs = unknownBlockIDs
