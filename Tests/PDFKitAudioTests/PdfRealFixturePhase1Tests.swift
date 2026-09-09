@@ -204,7 +204,7 @@ final class PdfRealFixturePhase1Tests: XCTestCase {
         }
     }
 
-    func testRealSingleColumnKeepsLegacyTextAndAnalyzerFastPath() throws {
+    func testRealSingleColumnKeepsSourceOrderAndAnalyzerFastPathWhileRestoringParagraphs() throws {
         let data = try fixtureData("01-single-column")
         let document = try XCTUnwrap(PDFDocument(data: data))
         let page = try XCTUnwrap(document.page(at: 0))
@@ -219,10 +219,12 @@ final class PdfRealFixturePhase1Tests: XCTestCase {
         )
         XCTAssertNil(analyzed)
         XCTAssertEqual(snapshot?.decision, .fastPath)
-        XCTAssertEqual(
-            try parser().parse(data: data).allPlainText(),
-            try parser(layout: .never).parse(data: data).allPlainText()
-        )
+        let automatic = try parser().parse(data: data).allPlainText()
+        let legacy = try parser(layout: .never).parse(data: data).allPlainText()
+        // Paragraph whitespace is an intentional repair even when full reading-
+        // order analysis is unnecessary. Do not lock in the old missing breaks.
+        XCTAssertTrue(automatic.contains("\n\nSection Two\n\n"))
+        XCTAssertEqual(automatic.replacingOccurrences(of: "\n\n", with: "\n"), legacy)
     }
 
     func testPhase1RealColumnsAreAcceptedWithoutFallback() throws {

@@ -358,7 +358,8 @@ public final class PdfParser: Sendable {
             let fragments: [PdfLayoutFragment]
             switch source {
             case .native:
-                fragments = PdfPositionedTextExtractor.nativeFragments(page: page)
+                fragments = PdfPositionedTextExtractor.nativeFragments(page: page,
+                    preservingSimpleOrder: layoutConfiguration.mode == .auto)
             case .ocr:
                 if let selectedOCRResult {
                     fragments = PdfPositionedTextExtractor.ocrFragments(from: selectedOCRResult)
@@ -382,6 +383,12 @@ public final class PdfParser: Sendable {
             ) {
                 selectedText = analyzed.text
                 layoutFingerprints = analyzed.fingerprints
+            } else if source == .native {
+                selectedText = PdfPositionedTextExtractor.nativeTextPreservingParagraphs(selectedText, page: page)
+            } else if source == .ocr {
+                let ordered = fragments.sorted { $0.sourceOrder < $1.sourceOrder }
+                selectedText = PdfParagraphText.restoringBoundaries(in: selectedText,
+                    lines: ordered.map(\.text), rects: ordered.map(\.rect))
             }
             try control.checkpoint()
         }

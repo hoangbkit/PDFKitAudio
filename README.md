@@ -1,6 +1,6 @@
 # PDFKitAudio
 
-Lightweight PDF extraction and audiobook-oriented text preparation for macOS 14+.
+Lightweight PDF extraction and audiobook-oriented text preparation for macOS 15+.
 
 PDFKitAudio is a standalone, **macOS-only** Swift package. It is designed for desktop document-to-audio workflows where imports, OCR, and downstream synthesis may run for a long time. The package does not declare iOS/iPadOS support.
 
@@ -117,7 +117,7 @@ The analyzer works from positioned native PDFKit fragments or retained Vision OC
 
 Layout modes are:
 
-- `.auto` — default. Ordinary single-column pages stay on the legacy selected-text fast path. Only pages with conservative evidence of columns, mixed regions, tables, sidebars, or irregular positioning are analyzed. A narrow high-confidence repair is also allowed for clearly reversed source order on otherwise simple pages.
+- `.auto` — default. Ordinary single-column pages keep their selected text order, with a lightweight spacing check to restore clearly separated paragraphs. Only pages with conservative evidence of columns, mixed regions, tables, sidebars, or irregular positioning undergo full layout analysis. A narrow high-confidence repair is also allowed for clearly reversed source order on otherwise simple pages.
 - `.never` — permanent escape hatch. Skip positioned layout work and preserve the legacy selected-text path.
 - `.always` — attempt reconstruction on every page with usable positioned text. This does **not** disable safety checks; low-confidence or structurally invalid output still falls back to selected text.
 
@@ -128,6 +128,22 @@ let parser = PdfParser(configuration: PdfParserConfiguration(
 ```
 
 The analyzer must earn the right to replace selected text. Accepted output requires exact fragment/block conservation, complete role coverage, a complete non-fallback reading order, sufficient reading-order confidence, non-empty meaningful output, and bounded information ratios. Failure at any gate permanently degrades to the existing selected-text path rather than dropping content.
+
+### Plain text and paragraph boundaries
+
+For apps that own chunking or paragraph-level caching, use `book.pages[i].text`,
+`chapter.plainText`, or `book.allPlainText()` directly; calling `audiobookScript`
+is not required. Paragraph boundaries use `\n\n`, and physical line breaks within
+a paragraph remain `\n` (except obvious hyphenated wraps joined by default cleanup).
+
+Existing blank lines survive cleanup. On simple ordered pages, `.auto` also
+restores blank lines when a vertical gap clearly exceeds the usual line spacing.
+Uniform spacing is ambiguous and is not split into separate paragraphs merely
+because the document is double-spaced. PDFs do not always encode paragraph
+semantics, so missing or ambiguous geometry cannot guarantee recovery of every
+original paragraph. `.never` retains the legacy text without this spacing repair.
+Whole-book and chapter text also separate pages with `\n\n`; those separators do
+not prove that a sentence spanning two pages starts a new paragraph.
 
 ### Supported layout families
 
@@ -311,7 +327,7 @@ Run the package regression suite with:
 swift test
 ```
 
-Unit tests generate deterministic small PDFs at runtime. The layout suite includes a large positioned fixture matrix plus adversarial geometry and quality/performance gates. The standalone demo additionally keeps a few tiny checked-in PDFs under `Examples/Demo/TestFixtures` for manual testing. CI runs the package tests, generates the XcodeGen example, builds it on macOS 14 with code signing disabled, and verifies the demo fixtures are present in the built app bundle.
+Unit tests generate deterministic small PDFs at runtime. The layout suite includes a large positioned fixture matrix plus adversarial geometry and quality/performance gates. The standalone demo additionally keeps a few tiny checked-in PDFs under `Examples/Demo/TestFixtures` for manual testing. CI is started manually for a selected branch and runs a four-job matrix covering macOS 15 and macOS 26 on both Intel and Apple Silicon (`macos-15-intel`, `macos-15`, `macos-26-intel`, and `macos-26`). Every job runs the package tests, generates the XcodeGen example, builds it with code signing disabled, and verifies the demo fixtures are present in the built app bundle. The package and demo both require macOS 15 or later.
 
 Layout diagnostics remain internal on purpose. Future problematic PDFs should be investigated through `PdfLayoutDiagnostics` snapshots rather than adding one-off production logging or widening the public API.
 

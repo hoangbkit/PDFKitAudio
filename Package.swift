@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "PDFKitAudio",
     platforms: [
-        .macOS(.v14)
+        .macOS("15.0")
     ],
     products: [
         .library(

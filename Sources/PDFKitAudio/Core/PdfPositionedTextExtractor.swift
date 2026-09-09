@@ -1,4 +1,5 @@
 import AppKit
+import CoreText
 import Foundation
 import PDFKit
 
@@ -39,6 +40,7 @@ enum PdfPositionedTextExtractor {
 
     static func nativeFragments(
         page: PDFPage,
+        preservingSimpleOrder: Bool = false,
         diagnostics: ((ExtractionSnapshot) -> Void)? = nil
     ) -> [PdfLayoutFragment] {
         let characterCount = page.numberOfCharacters
@@ -48,6 +50,10 @@ enum PdfPositionedTextExtractor {
         }
 
         let lineSelections = selection.selectionsByLine()
+        if preservingSimpleOrder, diagnostics == nil, lineSelections.count >= 3,
+           hasUnambiguousNativeOrder(lineSelections, page: page) {
+            return []
+        }
         let selectionFragments = lineSelections.enumerated().compactMap { index, selection -> PdfLayoutFragment? in
             guard let text = selection.string else { return nil }
             return PdfLayoutFragment(id: index, text: text,
@@ -111,6 +117,55 @@ enum PdfPositionedTextExtractor {
         return result
     }
 
+    /// A narrow parser-only escape avoids allocating fragment/line/block graphs
+    /// for already ordered, aligned prose. Any inset, overlapping baseline,
+    /// source-order reversal, disjoint range or unexplained spacing retains the
+    /// complete geometry pipeline. Diagnostic and .always calls never use it.
+    private static func hasUnambiguousNativeOrder(_ selections: [PDFSelection], page: PDFPage) -> Bool {
+        hasAlignedNativeOrder(selections, page: page)
+            && selections.allSatisfy { hasTightTypographicFit($0, page: page) }
+    }
+
+    private static func hasAlignedNativeOrder(_ selections: [PDFSelection], page: PDFPage) -> Bool {
+        guard page.rotation == 0, selections.count >= 2,
+              let first = selections.first else { return false }
+        let left = first.bounds(for: page).minX
+        var previousBottom = CGFloat.greatestFiniteMagnitude
+        for selection in selections {
+            let bounds = selection.bounds(for: page)
+            guard bounds.minX.isFinite, bounds.minY.isFinite, bounds.width > 0, bounds.height > 0,
+                  abs(bounds.minX - left) <= 1,
+                  bounds.maxY <= previousBottom + 0.5,
+                  textRanges(in: selection, page: page).count == 1 else { return false }
+            previousBottom = bounds.minY
+        }
+        return true
+    }
+
+    /// The simple-order shortcut skips layout graphs, not paragraph whitespace.
+    /// Only use selections whose text and geometry agree with the chosen source.
+    static func nativeTextPreservingParagraphs(_ text: String, page: PDFPage) -> String {
+        guard let selection = page.selection(for: NSRange(location: 0, length: page.numberOfCharacters)) else {
+            return text
+        }
+        let lines = selection.selectionsByLine()
+        // Paragraph repair only inserts whitespace into exactly matching text;
+        // it does not skip layout extraction or change source order. The strict
+        // typographic-fit check belongs to the extraction shortcut above, not
+        // here: ordinary font metric rounding can otherwise veto a whole page.
+        guard hasAlignedNativeOrder(lines, page: page) else { return text }
+        return PdfParagraphText.restoringBoundaries(in: text,
+            lines: lines.map { $0.string ?? "" },
+            rects: lines.map { PdfLayoutGeometry.normalizedPageRect($0.bounds(for: page), page: page) })
+    }
+
+    private static func hasTightTypographicFit(_ selection: PDFSelection, page: PDFPage) -> Bool {
+        guard let attributed = selection.attributedString else { return false }
+        let natural = CGFloat(CTLineGetTypographicBounds(CTLineCreateWithAttributedString(attributed), nil, nil, nil))
+        let actual = selection.bounds(for: page).width
+        return natural > 0 && abs(actual - natural) <= natural * 0.005 + 0.5
+    }
+
     /// `PDFSelection.selectionsByLine()` can legally return one selection for
     /// text that shares a visual baseline across separate columns. The first
     /// implementation tried to identify those lines from the selection's total
@@ -170,6 +225,11 @@ enum PdfPositionedTextExtractor {
                   ranges[0].length >= 8 else {
                 return nil
             }
+            // A tight typographic fit has no room for a meaningful interior
+            // gutter. Keep glyph probes for unexplained spacing, not every
+            // ordinary prose line; this is relative to text metrics, not a
+            // page-width cutoff that would miss narrow columns.
+            if hasTightTypographicFit(selection, page: page) { return nil }
             return ranges[0]
         }
         guard candidateRanges.count >= 2 else { return [] }

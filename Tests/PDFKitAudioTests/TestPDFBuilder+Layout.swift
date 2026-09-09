@@ -84,6 +84,11 @@ extension TestPDFBuilder {
         drawLayoutBoxes(spec.boxes, in: cgContext, pageSize: spec.size, scale: scale)
         image.unlockFocus()
 
+        // Keep the 2x pixels but restore the logical page size before embedding.
+        // Shrinking the PDF media box afterwards crops a 2x-sized image rather
+        // than scaling it, placing upper-page text outside the visible page.
+        image.size = spec.size
+
         // PDFPage(image:) asks NSImage for a committed bitmap representation. It
         // must happen after unlockFocus(); constructing the page while the image is
         // still focused can yield a nil backing CGImage on macOS 14 CI.

@@ -14,8 +14,6 @@ enum PdfLayoutAnalyzer {
     }
 
     private static let minimumReadingOrderConfidence = 0.62
-    private static let minimumInformationRatio = 0.72
-    private static let maximumInformationRatio = 2.20
     private static let minimumSimpleRepairConfidence = 0.82
 
     static func analyze(
@@ -409,25 +407,13 @@ enum PdfLayoutAnalyzer {
 
         guard uniqueIDs(blocks.map(\.id)) else { return false }
 
-        let sourceInformation = informativeCharacterCount(
-            fragments.map(\.text).joined(separator: "\n")
-        )
-        let outputInformation = informativeCharacterCount(output)
         func characterInventory(_ text: String) -> [Unicode.Scalar: Int] {
             text.unicodeScalars.reduce(into: [:]) { counts, scalar in
                 if CharacterSet.alphanumerics.contains(scalar) { counts[scalar, default: 0] += 1 }
             }
         }
-        guard characterInventory(output) == characterInventory(fragments.map(\.text).joined()) else { return false }
-        if sourceInformation > 0 {
-            let ratio = Double(outputInformation) / Double(sourceInformation)
-            guard ratio >= minimumInformationRatio,
-                  ratio <= maximumInformationRatio else {
-                return false
-            }
-        }
-
-        return true
+        // Exact conservation supersedes the old, permissive information ratio.
+        return characterInventory(output) == characterInventory(fragments.map(\.text).joined())
     }
 
     private static func conservesFragments(
@@ -454,14 +440,6 @@ enum PdfLayoutAnalyzer {
 
     private static func uniqueIDs(_ ids: [Int]) -> Bool {
         Set(ids).count == ids.count
-    }
-
-    private static func informativeCharacterCount(_ text: String) -> Int {
-        text.unicodeScalars.reduce(into: 0) { count, scalar in
-            if CharacterSet.alphanumerics.contains(scalar) {
-                count += 1
-            }
-        }
     }
 
     private static func median(_ values: [CGFloat]) -> CGFloat {
