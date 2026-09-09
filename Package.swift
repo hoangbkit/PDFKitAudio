@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "PDFKitAudio",
     platforms: [
-        .macOS(.v14)
+        .macOS("15.0")
     ],
     products: [
         .library(
@@ -20,7 +20,10 @@ let package = Package(
         .testTarget(
             name: "PDFKitAudioTests",
             dependencies: ["PDFKitAudio"],
-            path: "Tests/PDFKitAudioTests"
+            path: "Tests/PDFKitAudioTests",
+            resources: [
+                .copy("TestFixtures/PDFLayout")
+            ]
         )
     ]
 )

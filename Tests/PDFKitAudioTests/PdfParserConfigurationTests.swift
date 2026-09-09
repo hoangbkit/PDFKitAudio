@@ -9,6 +9,7 @@ final class PdfParserConfigurationTests: XCTestCase {
                 nativeTextThreshold: 123,
                 recognitionLanguages: ["vi-VN"]
             ),
+            layout: PdfLayoutConfiguration(mode: .always),
             cleanup: .minimal,
             extractCoverImage: false,
             retainNativeText: false
@@ -17,9 +18,17 @@ final class PdfParserConfigurationTests: XCTestCase {
 
         XCTAssertEqual(parser.configuration, configuration)
         XCTAssertEqual(parser.ocrConfiguration, configuration.ocr)
+        XCTAssertEqual(parser.layoutConfiguration, configuration.layout)
+        XCTAssertEqual(parser.layoutConfiguration.mode, .always)
         XCTAssertEqual(parser.cleanupConfiguration, configuration.cleanup)
         XCTAssertFalse(parser.extractCoverImage)
         XCTAssertFalse(parser.retainNativeText)
+    }
+
+    func testLayoutConfigurationDefaultsToAuto() {
+        let configuration = PdfParserConfiguration()
+        XCTAssertEqual(configuration.layout.mode, .auto)
+        XCTAssertEqual(PdfLayoutConfiguration().mode, .auto)
     }
 
     func testLegacyInitializerStillMapsToConsolidatedConfiguration() {
@@ -32,6 +41,7 @@ final class PdfParserConfigurationTests: XCTestCase {
 
         XCTAssertEqual(parser.configuration.ocr.mode, .never)
         XCTAssertEqual(parser.configuration.ocr.nativeTextThreshold, 77)
+        XCTAssertEqual(parser.configuration.layout.mode, .auto)
         XCTAssertEqual(parser.configuration.cleanup, .minimal)
         XCTAssertFalse(parser.configuration.extractCoverImage)
         XCTAssertTrue(parser.configuration.retainNativeText)
