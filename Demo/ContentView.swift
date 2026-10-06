@@ -367,6 +367,8 @@ private struct PDFKitView: UIViewRepresentable {
 }
 #endif
 
-#Preview {
-    ContentView()
+struct ContentView_Previews: PreviewProvider {
+    static var previews: some View {
+        ContentView()
+    }
 }
