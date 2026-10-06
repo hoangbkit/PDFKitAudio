@@ -34,7 +34,11 @@ enum PdfParagraphText {
             fontSizes: fontSizes, writingDirection: writingDirection ?? PdfLayoutLineBuilder.writingDirection(for: lines))
         guard !boundaries.isEmpty else { return text }
         for index in boundaries where indices[index] == indices[index - 1] + 1 {
-            terminators[indices[index - 1]] += "\n"
+            let componentIndex = indices[index - 1]
+            // Repeat the original terminator: appending LF to a lone CR would
+            // form a single CRLF rather than a blank line, breaking idempotence.
+            let separator = terminators[componentIndex]
+            terminators[componentIndex] += separator
         }
         return zip(components, terminators).map { $0.0 + $0.1 }.joined()
     }

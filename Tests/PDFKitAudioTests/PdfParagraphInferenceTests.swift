@@ -60,18 +60,36 @@ final class PdfParagraphInferenceTests: XCTestCase {
             lines: lines, rects: geometry), expected)
     }
 
+    func testInferredSeparatorsPreserveEachLineEndingStyleAndAreIdempotent() {
+        for separator in ["\n", "\r", "\r\n"] {
+            let source = lines.joined(separator: separator)
+            let expected = [lines[0..<3], lines[3..<7], lines[7..<10]]
+                .map { $0.joined(separator: separator) }
+                .joined(separator: separator + separator)
+            let restored = PdfParagraphText.restoringBoundaries(in: source, lines: lines, rects: rects())
+            XCTAssertEqual(Array(restored.utf8), Array(expected.utf8))
+            let repeated = PdfParagraphText.restoringBoundaries(in: restored, lines: lines, rects: rects())
+            XCTAssertEqual(Array(repeated.utf8), Array(expected.utf8))
+            XCTAssertEqual(restored.utf8.filter { $0 != 0x0A && $0 != 0x0D },
+                source.utf8.filter { $0 != 0x0A && $0 != 0x0D })
+        }
+    }
+
     func testExplicitSeparatorsLineEndingsAndUnicodeArePreservedExactly() {
         var unicode = lines
         unicode[2] = "Café  déjà vu. Tiếng Việt đẹp. 日本語。"
         let source = unicode.prefix(3).joined(separator: "\r\n") + "\r\n\r\n\r\n"
             + unicode.dropFirst(3).joined(separator: "\r")
         let expected = unicode.prefix(3).joined(separator: "\r\n") + "\r\n\r\n\r\n"
-            + unicode[3..<7].joined(separator: "\r") + "\r\n" + unicode[7..<10].joined(separator: "\r")
+            + unicode[3..<7].joined(separator: "\r") + "\r\r" + unicode[7..<10].joined(separator: "\r")
         let restored = PdfParagraphText.restoringBoundaries(in: source, lines: unicode, rects: rects())
-        XCTAssertEqual(restored, expected)
-        XCTAssertEqual(PdfParagraphText.restoringBoundaries(in: restored, lines: unicode, rects: rects()), expected)
-        XCTAssertEqual(restored.filter { $0 != "\n" && $0 != "\r" },
-            source.filter { $0 != "\n" && $0 != "\r" })
+        XCTAssertEqual(Array(restored.utf8), Array(expected.utf8))
+        let repeated = PdfParagraphText.restoringBoundaries(in: restored, lines: unicode, rects: rects())
+        XCTAssertEqual(Array(repeated.utf8), Array(expected.utf8))
+        // Swift groups CRLF into one Character. Compare bytes to remove only
+        // newline bytes and detect any changes to the original Unicode text.
+        XCTAssertEqual(restored.utf8.filter { $0 != 0x0A && $0 != 0x0D },
+            source.utf8.filter { $0 != 0x0A && $0 != 0x0D })
     }
 
     func testHyphenatedContinuationVetoesAnInferredIndentBoundary() {
