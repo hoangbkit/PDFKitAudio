@@ -314,7 +314,8 @@ enum PdfPositionedTextExtractor {
 
         let naturalBounds = attributed.boundingRect(
             with: CGSize(width: 100_000, height: 10_000),
-            options: [.usesLineFragmentOrigin, .usesFontLeading]
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            context: nil
         ).standardized
         guard naturalBounds.width > 0 else { return false }
         return bounds.width >= naturalBounds.width * 1.18
