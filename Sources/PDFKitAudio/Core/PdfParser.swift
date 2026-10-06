@@ -1,8 +1,13 @@
+#if canImport(AppKit)
 import AppKit
+#elseif canImport(UIKit)
+import UIKit
+#endif
+
 import Foundation
 import PDFKit
 
-/// macOS PDF parser optimized for document-to-audio ingestion.
+/// Apple-platform PDF parser optimized for document-to-audio ingestion.
 ///
 /// The parser itself is immutable and Sendable. Each parse execution creates and
 /// confines its own `PDFDocument`; PDFKit page access remains serial within that
@@ -422,11 +427,15 @@ public final class PdfParser: Sendable {
                 of: CGSize(width: 600, height: 800),
                 for: .mediaBox
             )
+#if canImport(AppKit)
             guard let tiff = thumbnail.tiffRepresentation else { return nil }
             return NSBitmapImageRep(data: tiff)?.representation(
                 using: .jpeg,
                 properties: [:]
             )
+#elseif canImport(UIKit)
+            return thumbnail.jpegData(compressionQuality: 0.9)
+#endif
         }
     }
 
