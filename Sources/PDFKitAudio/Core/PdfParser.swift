@@ -1,8 +1,13 @@
+#if canImport(AppKit)
 import AppKit
+#elseif canImport(UIKit)
+import UIKit
+#endif
+
 import Foundation
 import PDFKit
 
-/// macOS PDF parser optimized for document-to-audio ingestion.
+/// Apple-platform PDF parser optimized for document-to-audio ingestion.
 ///
 /// The parser itself is immutable and Sendable. Each parse execution creates and
 /// confines its own `PDFDocument`; PDFKit page access remains serial within that
@@ -356,10 +361,12 @@ public final class PdfParser: Sendable {
             // progress stage.
             try control.checkpoint()
             let fragments: [PdfLayoutFragment]
+            var nativeLineSelections: [PDFSelection]?
             switch source {
             case .native:
                 fragments = PdfPositionedTextExtractor.nativeFragments(page: page,
-                    preservingSimpleOrder: layoutConfiguration.mode == .auto)
+                    preservingSimpleOrder: layoutConfiguration.mode == .auto,
+                    paragraphLines: { nativeLineSelections = $0 })
             case .ocr:
                 if let selectedOCRResult {
                     fragments = PdfPositionedTextExtractor.ocrFragments(from: selectedOCRResult)
@@ -384,7 +391,8 @@ public final class PdfParser: Sendable {
                 selectedText = analyzed.text
                 layoutFingerprints = analyzed.fingerprints
             } else if source == .native {
-                selectedText = PdfPositionedTextExtractor.nativeTextPreservingParagraphs(selectedText, page: page)
+                selectedText = PdfPositionedTextExtractor.nativeTextPreservingParagraphs(selectedText,
+                    page: page, lineSelections: nativeLineSelections)
             } else if source == .ocr {
                 let ordered = fragments.sorted { $0.sourceOrder < $1.sourceOrder }
                 selectedText = PdfParagraphText.restoringBoundaries(in: selectedText,
@@ -422,11 +430,15 @@ public final class PdfParser: Sendable {
                 of: CGSize(width: 600, height: 800),
                 for: .mediaBox
             )
+#if canImport(AppKit)
             guard let tiff = thumbnail.tiffRepresentation else { return nil }
             return NSBitmapImageRep(data: tiff)?.representation(
                 using: .jpeg,
                 properties: [:]
             )
+#elseif canImport(UIKit)
+            return thumbnail.jpegData(compressionQuality: 0.9)
+#endif
         }
     }
 

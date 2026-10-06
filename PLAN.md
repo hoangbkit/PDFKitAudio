@@ -840,9 +840,9 @@ Make the package reusable and unsurprising as an Apple-platform dependency.
 
 ## Platform strategy
 
-Current source imports AppKit directly and `Package.swift` is macOS-only.
+Historical pre-v1.1 source imported AppKit directly and `Package.swift` was macOS-only.
 
-If Spokio needs PDF parsing on iOS, support both platforms by abstracting only the small image/platform surface needed by:
+v1.1 adds iOS support by abstracting only the small image/platform surface needed by:
 
 - PDF page thumbnails/rendering
 - image -> CGImage conversion

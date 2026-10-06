@@ -1,0 +1,118 @@
+name: PDFKitAudioDemo
+
+options:
+  minimumXcodeGenVersion: 2.45.4
+  xcodeVersion: "26.0"
+  projectFormat: xcode15_3
+  createIntermediateGroups: true
+  defaultConfig: Debug
+  developmentLanguage: en
+  deploymentTarget:
+    macOS: "15.0"
+    iOS: "26.0"
+
+configs:
+  Debug: debug
+  Release: release
+
+packages:
+  PDFKitAudio:
+    path: ..
+
+targets:
+  PDFKitAudioDemo:
+    type: application
+    platform: macOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: .
+        excludes:
+          - README.md
+          - project.yml
+          - PDFKitAudioDemo.entitlements
+          - PDFKitAudioDemo.xcodeproj
+          - sample.pdf
+      - path: sample.pdf
+        buildPhase: resources
+    dependencies:
+      - package: PDFKitAudio
+        product: PDFKitAudio
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.hoangbkit.pdfkit.demo
+        PRODUCT_NAME: PDFKitAudioDemo
+        DEVELOPMENT_TEAM: J458WW3452
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: PDFKitAudio Demo
+        INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        CODE_SIGN_ENTITLEMENTS: PDFKitAudioDemo.entitlements
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_APP_SANDBOX: YES
+        ENABLE_HARDENED_RUNTIME: YES
+        ENABLE_PREVIEWS: YES
+        ENABLE_USER_SCRIPT_SANDBOXING: YES
+        MARKETING_VERSION: "1.1"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_VERSION: "5.0"
+
+  PDFKitAudioDemo-iOS:
+    type: application
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: .
+        excludes:
+          - README.md
+          - project.yml
+          - PDFKitAudioDemo.entitlements
+          - PDFKitAudioDemo.xcodeproj
+          - sample.pdf
+      - path: sample.pdf
+        buildPhase: resources
+    dependencies:
+      - package: PDFKitAudio
+        product: PDFKitAudio
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.hoangbkit.pdfkit.demo.ios
+        PRODUCT_NAME: PDFKitAudioDemo
+        DEVELOPMENT_TEAM: J458WW3452
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: PDFKitAudio Demo
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_PREVIEWS: YES
+        MARKETING_VERSION: "1.1"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+
+schemes:
+  PDFKitAudioDemo:
+    build:
+      targets:
+        PDFKitAudioDemo: all
+    run:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+
+  PDFKitAudioDemo-iOS:
+    build:
+      targets:
+        PDFKitAudioDemo-iOS: all
+    run:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release

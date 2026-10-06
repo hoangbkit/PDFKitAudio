@@ -356,6 +356,8 @@ enum PdfLayoutAnalyzer {
         }
 
         var emittedTables: Set<Int> = []
+        let rolesByID = Dictionary(analysis.assignments.map { ($0.blockID, $0.role) },
+            uniquingKeysWith: { first, _ in first })
         var parts: [String] = []
         parts.reserveCapacity(orderedBlockIDs.count)
 
@@ -383,7 +385,17 @@ enum PdfLayoutAnalyzer {
                 continue
             }
 
-            let text = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            var text = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Paragraph whitespace is an output concern. Do not split structural
+            // blocks or change table/role/fingerprint/reading-order decisions.
+            // Each body block is a local context; never mix adjacent columns.
+            if rolesByID[blockID] == .body,
+               let direction = block.lines.first?.writingDirection,
+               block.lines.allSatisfy({ $0.writingDirection == direction }) {
+                text = PdfParagraphText.restoringBoundaries(in: text,
+                    lines: block.lines.map(\.text), rects: block.lines.map(\.rect),
+                    fontSizes: block.lines.map(\.medianFontSize), writingDirection: direction)
+            }
             if !text.isEmpty {
                 parts.append(text)
             }

@@ -1,4 +1,9 @@
+#if canImport(AppKit)
 import AppKit
+#elseif canImport(UIKit)
+import UIKit
+#endif
+
 import CoreText
 import Foundation
 import PDFKit
@@ -41,6 +46,7 @@ enum PdfPositionedTextExtractor {
     static func nativeFragments(
         page: PDFPage,
         preservingSimpleOrder: Bool = false,
+        paragraphLines: (([PDFSelection]) -> Void)? = nil,
         diagnostics: ((ExtractionSnapshot) -> Void)? = nil
     ) -> [PdfLayoutFragment] {
         let characterCount = page.numberOfCharacters
@@ -50,6 +56,7 @@ enum PdfPositionedTextExtractor {
         }
 
         let lineSelections = selection.selectionsByLine()
+        paragraphLines?(lineSelections)
         if preservingSimpleOrder, diagnostics == nil, lineSelections.count >= 3,
            hasUnambiguousNativeOrder(lineSelections, page: page) {
             return []
@@ -144,19 +151,38 @@ enum PdfPositionedTextExtractor {
 
     /// The simple-order shortcut skips layout graphs, not paragraph whitespace.
     /// Only use selections whose text and geometry agree with the chosen source.
-    static func nativeTextPreservingParagraphs(_ text: String, page: PDFPage) -> String {
-        guard let selection = page.selection(for: NSRange(location: 0, length: page.numberOfCharacters)) else {
-            return text
+    static func nativeTextPreservingParagraphs(
+        _ text: String, page: PDFPage, lineSelections: [PDFSelection]? = nil
+    ) -> String {
+        let lines: [PDFSelection]
+        if let lineSelections {
+            lines = lineSelections
+        } else {
+            guard let selection = page.selection(for: NSRange(location: 0, length: page.numberOfCharacters)) else {
+                return text
+            }
+            lines = selection.selectionsByLine()
         }
-        let lines = selection.selectionsByLine()
         // Paragraph repair only inserts whitespace into exactly matching text;
         // it does not skip layout extraction or change source order. The strict
         // typographic-fit check belongs to the extraction shortcut above, not
         // here: ordinary font metric rounding can otherwise veto a whole page.
-        guard hasAlignedNativeOrder(lines, page: page) else { return text }
+        guard page.rotation == 0, lines.count >= 2 else { return text }
+        let texts = lines.map { $0.string ?? "" }
+        let rects = lines.map { selection -> CGRect in
+            // A disjoint selection can span unrelated regions. It is a local
+            // barrier, not a reason to discard good geometry elsewhere.
+            guard textRanges(in: selection, page: page).count == 1 else { return .null }
+            return PdfLayoutGeometry.normalizedPageRect(selection.bounds(for: page), page: page)
+        }
+        let direction = PdfLayoutLineBuilder.writingDirection(for: texts)
+        // A heading, inset quotation or centered footer does not share the body
+        // margin. The classifier checks consecutive regions; a page-wide edge
+        // spread would reject ordinary book pages before inspecting their prose.
         return PdfParagraphText.restoringBoundaries(in: text,
-            lines: lines.map { $0.string ?? "" },
-            rects: lines.map { PdfLayoutGeometry.normalizedPageRect($0.bounds(for: page), page: page) })
+            lines: texts, rects: rects,
+            fontSizes: lines.map { styleHints(from: $0.attributedString)?.fontSize },
+            writingDirection: direction)
     }
 
     private static func hasTightTypographicFit(_ selection: PDFSelection, page: PDFPage) -> Bool {
@@ -309,7 +335,8 @@ enum PdfPositionedTextExtractor {
 
         let naturalBounds = attributed.boundingRect(
             with: CGSize(width: 100_000, height: 10_000),
-            options: [.usesLineFragmentOrigin, .usesFontLeading]
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            context: nil
         ).standardized
         guard naturalBounds.width > 0 else { return false }
         return bounds.width >= naturalBounds.width * 1.18
@@ -561,12 +588,11 @@ enum PdfPositionedTextExtractor {
             in: NSRange(location: 0, length: attributedString.length),
             options: []
         ) { value, _, _ in
-            guard let font = value as? NSFont else { return }
+            guard let hints = platformFontHints(from: value) else { return }
             sawFont = true
-            sizes.append(font.pointSize)
-            let traits = font.fontDescriptor.symbolicTraits
-            sawBold = sawBold || traits.contains(.bold)
-            sawItalic = sawItalic || traits.contains(.italic)
+            sizes.append(hints.size)
+            sawBold = sawBold || hints.isBold
+            sawItalic = sawItalic || hints.isItalic
         }
 
         guard sawFont else { return nil }
@@ -577,6 +603,28 @@ enum PdfPositionedTextExtractor {
             isBold: sawBold,
             isItalic: sawItalic
         )
+    }
+
+    private static func platformFontHints(
+        from value: Any?
+    ) -> (size: CGFloat, isBold: Bool, isItalic: Bool)? {
+#if canImport(AppKit)
+        guard let font = value as? NSFont else { return nil }
+        let traits = font.fontDescriptor.symbolicTraits
+        return (
+            size: font.pointSize,
+            isBold: traits.contains(.bold),
+            isItalic: traits.contains(.italic)
+        )
+#elseif canImport(UIKit)
+        guard let font = value as? UIFont else { return nil }
+        let traits = font.fontDescriptor.symbolicTraits
+        return (
+            size: font.pointSize,
+            isBold: traits.contains(.traitBold),
+            isItalic: traits.contains(.traitItalic)
+        )
+#endif
     }
 }
 

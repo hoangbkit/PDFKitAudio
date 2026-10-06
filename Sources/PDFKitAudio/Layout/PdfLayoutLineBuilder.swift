@@ -306,11 +306,15 @@ enum PdfLayoutLineBuilder {
     private static func writingDirection(
         for fragments: [PdfLayoutFragment]
     ) -> PdfLayoutWritingDirection {
+        writingDirection(for: fragments.map(\.text))
+    }
+
+    static func writingDirection(for texts: [String]) -> PdfLayoutWritingDirection {
         var rtl = 0
         var ltr = 0
 
-        for fragment in fragments {
-            for scalar in fragment.text.unicodeScalars {
+        for text in texts {
+            for scalar in text.unicodeScalars {
                 if isRTLScalar(scalar) {
                     rtl += 1
                 } else if CharacterSet.letters.contains(scalar) || CharacterSet.decimalDigits.contains(scalar) {

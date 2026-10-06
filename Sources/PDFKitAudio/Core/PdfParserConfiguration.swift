@@ -2,7 +2,7 @@ import Foundation
 
 /// Consolidated configuration for `PdfParser`.
 ///
-/// PDFKitAudio is intentionally macOS-only. The defaults are tuned for long-lived
+/// The defaults are tuned for long-lived
 /// document-to-audio workflows: native PDF text first, selective Vision OCR,
 /// conservative automatic layout reconstruction, audiobook cleanup, bounded
 /// cover generation, and retained native text for diagnostics.
