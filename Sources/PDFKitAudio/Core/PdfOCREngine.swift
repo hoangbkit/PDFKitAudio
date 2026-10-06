@@ -1,4 +1,9 @@
+#if canImport(AppKit)
 import AppKit
+#elseif canImport(UIKit)
+import UIKit
+#endif
+
 import Foundation
 import PDFKit
 import Vision
@@ -43,6 +48,7 @@ enum PdfOCREngine {
         let targetSize = renderSize(for: page)
         let thumbnail = page.thumbnail(of: targetSize, for: .mediaBox)
 
+#if canImport(AppKit)
         if let cgImage = thumbnail.cgImage(forProposedRect: nil, context: nil, hints: nil) {
             return recognize(cgImage: cgImage, configuration: configuration)
         }
@@ -53,6 +59,10 @@ enum PdfOCREngine {
             return nil
         }
         return recognize(cgImage: cgImage, configuration: configuration)
+#elseif canImport(UIKit)
+        guard let cgImage = thumbnail.cgImage else { return nil }
+        return recognize(cgImage: cgImage, configuration: configuration)
+#endif
     }
 
     static func makeRequest(configuration: PdfOCRConfiguration) -> VNRecognizeTextRequest {
