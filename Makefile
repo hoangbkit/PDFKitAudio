@@ -3,7 +3,7 @@ include .env
 export
 endif
 
-EXAMPLE_DIR := Examples/Demo
+EXAMPLE_DIR := Demo
 XCODEPROJ := $(EXAMPLE_DIR)/PDFKitAudioDemo.xcodeproj
 SCHEME := PDFKitAudioDemo
 DERIVED_DATA ?= $(HOME)/Developer/tmp/PDFKitAudioDemoDerivedData
@@ -43,9 +43,7 @@ example-build-ci: example-generate
 		-derivedDataPath $(DERIVED_DATA) \
 		CODE_SIGNING_ALLOWED=NO \
 		build
-	@test -f "$(APP)/Contents/Resources/digital-text.pdf"
-	@test -f "$(APP)/Contents/Resources/outline-chapters.pdf"
-	@test -f "$(APP)/Contents/Resources/blank-page.pdf"
+	@test -f "$(APP)/Contents/Resources/sample.pdf"
 
 example-open: example-generate
 	open "$(XCODEPROJ)"
