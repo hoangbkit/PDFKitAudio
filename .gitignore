@@ -10,7 +10,7 @@ Package.resolved
 xcuserdata/
 DerivedData/
 build/
-Examples/**/*.xcodeproj/
+Demo/*.xcodeproj/
 
 # macOS
 .DS_Store
