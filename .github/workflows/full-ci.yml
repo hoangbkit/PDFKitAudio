@@ -1,0 +1,73 @@
+name: Full CI
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: full-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS 15 Intel
+            runner: macos-15-intel
+            arch: x86_64
+          - name: macOS 15 Apple Silicon
+            runner: macos-15
+            arch: arm64
+          - name: macOS 26 Apple Silicon
+            runner: macos-26
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Select Xcode 26.3
+        run: sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+
+      - name: Show toolchain
+        run: |
+          uname -m
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Validate package manifest
+        run: swift package dump-package >/dev/null
+
+      - name: Run package tests
+        run: swift test
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Demo project
+        working-directory: Examples/Demo
+        run: xcodegen generate --spec project.yml
+
+      - name: Build macOS Demo
+        working-directory: Examples/Demo
+        run: |
+          xcodebuild \
+            -project PDFKitAudioDemo.xcodeproj \
+            -scheme PDFKitAudioDemo \
+            -configuration Debug \
+            -destination "platform=macOS,arch=${{ matrix.arch }}" \
+            -derivedDataPath "$PWD/.derivedData-macOS" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+          test -f "$PWD/.derivedData-macOS/Build/Products/Debug/PDFKitAudioDemo.app/Contents/Resources/digital-text.pdf"
+          test -f "$PWD/.derivedData-macOS/Build/Products/Debug/PDFKitAudioDemo.app/Contents/Resources/outline-chapters.pdf"
+          test -f "$PWD/.derivedData-macOS/Build/Products/Debug/PDFKitAudioDemo.app/Contents/Resources/blank-page.pdf"

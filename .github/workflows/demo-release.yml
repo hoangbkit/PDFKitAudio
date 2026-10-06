@@ -1,0 +1,165 @@
+name: Demo Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: Configuration
+        required: true
+        default: Release
+        type: choice
+        options:
+          - Debug
+          - Release
+          - both
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mycli-demo-release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and release Demo
+    runs-on: macos-26
+
+    steps:
+      - name: Checkout selected ref
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Select Xcode 26.3
+        run: sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+
+      - name: Show selection and toolchain
+        run: |
+          echo "Platform:      macOS"
+          echo "Configuration: ${{ inputs.configuration }}"
+          sw_vers
+          uname -m
+          xcodebuild -version
+          swift --version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Demo project
+        working-directory: Examples/Demo
+        run: xcodegen generate --spec project.yml
+
+      - name: Set build release tag
+        id: release
+        shell: bash
+        run: |
+          tag="mycli-build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "release_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "Build release: $tag"
+
+      - name: Build unsigned universal macOS Demo
+        shell: bash
+        env:
+          BUILD_CONFIGURATION: ${{ inputs.configuration }}
+        run: |
+          set -euo pipefail
+
+          SOURCE_PACKAGES="$RUNNER_TEMP/PDFKitAudioDemo-SourcePackages"
+          ARTIFACTS="$GITHUB_WORKSPACE/artifacts"
+          mkdir -p "$ARTIFACTS"
+
+          case "$BUILD_CONFIGURATION" in
+            Debug) CONFIGURATIONS=(Debug) ;;
+            Release) CONFIGURATIONS=(Release) ;;
+            both) CONFIGURATIONS=(Debug Release) ;;
+            *) echo "error: unsupported configuration '$BUILD_CONFIGURATION'" >&2; exit 1 ;;
+          esac
+
+          for CONFIGURATION in "${CONFIGURATIONS[@]}"; do
+            MAC_DERIVED="$RUNNER_TEMP/PDFKitAudioDemo-macOS-$CONFIGURATION"
+
+            xcodebuild \
+              -project Examples/Demo/PDFKitAudioDemo.xcodeproj \
+              -scheme PDFKitAudioDemo \
+              -configuration "$CONFIGURATION" \
+              -sdk macosx \
+              -destination "platform=macOS" \
+              -derivedDataPath "$MAC_DERIVED" \
+              -clonedSourcePackagesDirPath "$SOURCE_PACKAGES" \
+              ARCHS="arm64 x86_64" \
+              ONLY_ACTIVE_ARCH=NO \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              build
+
+            MAC_APP="$MAC_DERIVED/Build/Products/$CONFIGURATION/PDFKitAudioDemo.app"
+            test -d "$MAC_APP"
+
+            MAC_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$MAC_APP/Contents/Info.plist")"
+            echo "$CONFIGURATION macOS bundle id: $MAC_BUNDLE_ID"
+            [[ "$MAC_BUNDLE_ID" == "com.hoangbkit.pdfkit.demo" ]] || {
+              echo "error: unexpected macOS bundle identifier" >&2
+              exit 1
+            }
+
+            MAC_EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$MAC_APP/Contents/Info.plist")"
+            MAC_ARCHS="$(lipo -archs "$MAC_APP/Contents/MacOS/$MAC_EXECUTABLE")"
+            echo "$CONFIGURATION macOS architectures: $MAC_ARCHS"
+            [[ " $MAC_ARCHS " == *" arm64 "* ]] || { echo "error: arm64 slice missing" >&2; exit 1; }
+            [[ " $MAC_ARCHS " == *" x86_64 "* ]] || { echo "error: x86_64 slice missing" >&2; exit 1; }
+
+            test -f "$MAC_APP/Contents/Resources/digital-text.pdf"
+            test -f "$MAC_APP/Contents/Resources/outline-chapters.pdf"
+            test -f "$MAC_APP/Contents/Resources/blank-page.pdf"
+
+            CONFIGURATION_LOWER="$(echo "$CONFIGURATION" | tr '[:upper:]' '[:lower:]')"
+            ditto -c -k --sequesterRsrc --keepParent \
+              "$MAC_APP" \
+              "$ARTIFACTS/PDFKitAudioDemo-macOS-universal-$CONFIGURATION_LOWER-unsigned-${{ steps.release.outputs.tag }}.zip"
+
+            rm -rf "$MAC_DERIVED"
+          done
+
+      - name: Verify release archives
+        shell: bash
+        env:
+          BUILD_CONFIGURATION: ${{ inputs.configuration }}
+        run: |
+          set -euo pipefail
+
+          ls -lh artifacts
+
+          case "$BUILD_CONFIGURATION" in
+            Debug) CONFIGURATIONS=(debug) ;;
+            Release) CONFIGURATIONS=(release) ;;
+            both) CONFIGURATIONS=(debug release) ;;
+            *) echo "error: unsupported configuration '$BUILD_CONFIGURATION'" >&2; exit 1 ;;
+          esac
+
+          for configuration in "${CONFIGURATIONS[@]}"; do
+            test -f "artifacts/PDFKitAudioDemo-macOS-universal-$configuration-unsigned-${{ steps.release.outputs.tag }}.zip"
+          done
+
+          for archive in artifacts/*.zip; do
+            bytes="$(stat -f%z "$archive")"
+            if (( bytes >= 2147483648 )); then
+              echo "error: $archive is too large for a GitHub Release asset" >&2
+              exit 1
+            fi
+          done
+
+      - name: Create GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_SHA: ${{ steps.release.outputs.release_sha }}
+        shell: bash
+        run: |
+          gh release create "$RELEASE_TAG" artifacts/*.zip \
+            --target "$RELEASE_SHA" \
+            --title "$RELEASE_TAG" \
+            --prerelease \
+            --generate-notes
