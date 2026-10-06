@@ -30,7 +30,7 @@ struct ContentView: View {
                 Button {
                     model.loadSamplePDF()
                 } label: {
-                    Label("Use Sample PDF", systemImage: "doc.badge.gearshape")
+                    Label("Use Sample PDF", systemImage: "doc.text")
                 }
 
                 Button {
