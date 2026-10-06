@@ -52,11 +52,11 @@ jobs:
         run: brew install xcodegen
 
       - name: Generate Demo project
-        working-directory: Examples/Demo
+        working-directory: Demo
         run: xcodegen generate --spec project.yml
 
       - name: Build macOS Demo
-        working-directory: Examples/Demo
+        working-directory: Demo
         run: |
           xcodebuild \
             -project PDFKitAudioDemo.xcodeproj \
@@ -68,6 +68,20 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             build
 
-          test -f "$PWD/.derivedData-macOS/Build/Products/Debug/PDFKitAudioDemo.app/Contents/Resources/digital-text.pdf"
-          test -f "$PWD/.derivedData-macOS/Build/Products/Debug/PDFKitAudioDemo.app/Contents/Resources/outline-chapters.pdf"
-          test -f "$PWD/.derivedData-macOS/Build/Products/Debug/PDFKitAudioDemo.app/Contents/Resources/blank-page.pdf"
+          test -f "$PWD/.derivedData-macOS/Build/Products/Debug/PDFKitAudioDemo.app/Contents/Resources/sample.pdf"
+
+      - name: Build iOS Demo
+        if: matrix.runner == 'macos-26'
+        working-directory: Demo
+        run: |
+          xcodebuild \
+            -project PDFKitAudioDemo.xcodeproj \
+            -scheme PDFKitAudioDemo-iOS \
+            -configuration Debug \
+            -destination "generic/platform=iOS Simulator" \
+            -derivedDataPath "$PWD/.derivedData-iOS" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+          test -f "$PWD/.derivedData-iOS/Build/Products/Debug-iphonesimulator/PDFKitAudioDemo.app/sample.pdf"
