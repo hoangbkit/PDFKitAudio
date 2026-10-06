@@ -3,6 +3,15 @@ name: Demo Release
 on:
   workflow_dispatch:
     inputs:
+      platform:
+        description: Platform
+        required: true
+        default: macOS
+        type: choice
+        options:
+          - macOS
+          - iOS
+          - both
       configuration:
         description: Configuration
         required: true
@@ -37,7 +46,7 @@ jobs:
 
       - name: Show selection and toolchain
         run: |
-          echo "Platform:      macOS"
+          echo "Platform:      ${{ inputs.platform }}"
           echo "Configuration: ${{ inputs.configuration }}"
           sw_vers
           uname -m
@@ -48,7 +57,7 @@ jobs:
         run: brew install xcodegen
 
       - name: Generate Demo project
-        working-directory: Examples/Demo
+        working-directory: Demo
         run: xcodegen generate --spec project.yml
 
       - name: Set build release tag
@@ -60,7 +69,67 @@ jobs:
           echo "release_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "Build release: $tag"
 
+      - name: Archive unsigned iOS Demo
+        if: ${{ inputs.platform == 'iOS' || inputs.platform == 'both' }}
+        shell: bash
+        env:
+          BUILD_CONFIGURATION: ${{ inputs.configuration }}
+        run: |
+          set -euo pipefail
+
+          SOURCE_PACKAGES="$RUNNER_TEMP/PDFKitAudioDemo-SourcePackages"
+          ARTIFACTS="$GITHUB_WORKSPACE/artifacts"
+          mkdir -p "$ARTIFACTS"
+
+          case "$BUILD_CONFIGURATION" in
+            Debug) CONFIGURATIONS=(Debug) ;;
+            Release) CONFIGURATIONS=(Release) ;;
+            both) CONFIGURATIONS=(Debug Release) ;;
+            *) echo "error: unsupported configuration '$BUILD_CONFIGURATION'" >&2; exit 1 ;;
+          esac
+
+          for CONFIGURATION in "${CONFIGURATIONS[@]}"; do
+            IOS_DERIVED="$RUNNER_TEMP/PDFKitAudioDemo-iOS-$CONFIGURATION"
+            IOS_ARCHIVE="$RUNNER_TEMP/PDFKitAudioDemo-$CONFIGURATION.xcarchive"
+
+            xcodebuild \
+              -project Demo/PDFKitAudioDemo.xcodeproj \
+              -scheme PDFKitAudioDemo-iOS \
+              -configuration "$CONFIGURATION" \
+              -sdk iphoneos \
+              -destination "generic/platform=iOS" \
+              -derivedDataPath "$IOS_DERIVED" \
+              -clonedSourcePackagesDirPath "$SOURCE_PACKAGES" \
+              -archivePath "$IOS_ARCHIVE" \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              archive
+
+            test -d "$IOS_ARCHIVE"
+            IOS_APP_COUNT="$(find "$IOS_ARCHIVE/Products/Applications" -maxdepth 1 -type d -name '*.app' -print | wc -l | tr -d ' ')"
+            if [[ "$IOS_APP_COUNT" != "1" ]]; then
+              echo "error: expected exactly one iOS app in $CONFIGURATION archive, found $IOS_APP_COUNT" >&2
+              exit 1
+            fi
+            IOS_APP="$(find "$IOS_ARCHIVE/Products/Applications" -maxdepth 1 -type d -name '*.app' -print)"
+            IOS_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$IOS_APP/Info.plist")"
+            echo "$CONFIGURATION iOS bundle id: $IOS_BUNDLE_ID"
+            [[ "$IOS_BUNDLE_ID" == "com.hoangbkit.pdfkit.demo.ios" ]] || {
+              echo "error: unexpected iOS bundle identifier" >&2
+              exit 1
+            }
+            test -f "$IOS_APP/sample.pdf"
+
+            CONFIGURATION_LOWER="$(echo "$CONFIGURATION" | tr '[:upper:]' '[:lower:]')"
+            ditto -c -k --sequesterRsrc --keepParent \
+              "$IOS_ARCHIVE" \
+              "$ARTIFACTS/PDFKitAudioDemo-iOS-$CONFIGURATION_LOWER-unsigned-${{ steps.release.outputs.tag }}.xcarchive.zip"
+
+            rm -rf "$IOS_DERIVED" "$IOS_ARCHIVE"
+          done
+
       - name: Build unsigned universal macOS Demo
+        if: ${{ inputs.platform == 'macOS' || inputs.platform == 'both' }}
         shell: bash
         env:
           BUILD_CONFIGURATION: ${{ inputs.configuration }}
@@ -82,7 +151,7 @@ jobs:
             MAC_DERIVED="$RUNNER_TEMP/PDFKitAudioDemo-macOS-$CONFIGURATION"
 
             xcodebuild \
-              -project Examples/Demo/PDFKitAudioDemo.xcodeproj \
+              -project Demo/PDFKitAudioDemo.xcodeproj \
               -scheme PDFKitAudioDemo \
               -configuration "$CONFIGURATION" \
               -sdk macosx \
@@ -110,10 +179,7 @@ jobs:
             echo "$CONFIGURATION macOS architectures: $MAC_ARCHS"
             [[ " $MAC_ARCHS " == *" arm64 "* ]] || { echo "error: arm64 slice missing" >&2; exit 1; }
             [[ " $MAC_ARCHS " == *" x86_64 "* ]] || { echo "error: x86_64 slice missing" >&2; exit 1; }
-
-            test -f "$MAC_APP/Contents/Resources/digital-text.pdf"
-            test -f "$MAC_APP/Contents/Resources/outline-chapters.pdf"
-            test -f "$MAC_APP/Contents/Resources/blank-page.pdf"
+            test -f "$MAC_APP/Contents/Resources/sample.pdf"
 
             CONFIGURATION_LOWER="$(echo "$CONFIGURATION" | tr '[:upper:]' '[:lower:]')"
             ditto -c -k --sequesterRsrc --keepParent \
@@ -126,6 +192,7 @@ jobs:
       - name: Verify release archives
         shell: bash
         env:
+          BUILD_PLATFORM: ${{ inputs.platform }}
           BUILD_CONFIGURATION: ${{ inputs.configuration }}
         run: |
           set -euo pipefail
@@ -140,7 +207,12 @@ jobs:
           esac
 
           for configuration in "${CONFIGURATIONS[@]}"; do
-            test -f "artifacts/PDFKitAudioDemo-macOS-universal-$configuration-unsigned-${{ steps.release.outputs.tag }}.zip"
+            if [[ "$BUILD_PLATFORM" == "iOS" || "$BUILD_PLATFORM" == "both" ]]; then
+              test -f "artifacts/PDFKitAudioDemo-iOS-$configuration-unsigned-${{ steps.release.outputs.tag }}.xcarchive.zip"
+            fi
+            if [[ "$BUILD_PLATFORM" == "macOS" || "$BUILD_PLATFORM" == "both" ]]; then
+              test -f "artifacts/PDFKitAudioDemo-macOS-universal-$configuration-unsigned-${{ steps.release.outputs.tag }}.zip"
+            fi
           done
 
           for archive in artifacts/*.zip; do
