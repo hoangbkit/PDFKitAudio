@@ -1,8 +1,8 @@
 # PDFKitAudio
 
-Lightweight PDF extraction and audiobook-oriented text preparation for macOS 15+.
+Lightweight PDF extraction and audiobook-oriented text preparation for macOS 15+ and iOS 26+.
 
-PDFKitAudio is a standalone, **macOS-only** Swift package. It is designed for desktop document-to-audio workflows where imports, OCR, and downstream synthesis may run for a long time. The package does not declare iOS/iPadOS support.
+PDFKitAudio is a standalone Swift package for Apple-platform document-to-audio workflows. It supports macOS 15+ and iOS 26+, with one shared parser implementation across both platforms.
 
 The parser uses PDFKit native text first, selectively falls back to Vision OCR, and can reconstruct spoken reading order for layout-heavy pages with a lightweight geometry-first analyzer. It intentionally avoids heavyweight document-understanding models.
 
@@ -19,7 +19,7 @@ In Xcode, choose **File → Add Package Dependencies…** and add:
 https://github.com/hoangbkit/PDFKitAudio.git
 ```
 
-Add the `PDFKitAudio` product to your macOS target.
+Add the `PDFKitAudio` product to your macOS or iOS target.
 
 ### Package.swift
 
@@ -273,9 +273,9 @@ PDFKit access is intentionally serial rather than page-parallel. Each page is pr
 
 The package deliberately does not add an `AsyncSequence` page-streaming API yet. Stage/page progress is the smaller public surface unless a real standalone use case demonstrates a need for streaming partial page objects.
 
-## Example macOS app
+## Shared macOS and iOS demo
 
-A signed, sandboxed demo app lives in `Examples/Demo` and is generated with XcodeGen. The generated `.xcodeproj` is intentionally not committed.
+A shared SwiftUI demo lives in `Demo` and is generated with XcodeGen. It has separate macOS 15+ and iOS 26+ targets while reusing the same source files. The generated `.xcodeproj` is intentionally not committed.
 
 Requirements:
 
@@ -301,9 +301,9 @@ Or build and launch it:
 make example-run
 ```
 
-The example includes small PDF fixtures under `Examples/Demo/TestFixtures` for quick manual parser checks. They are bundled into the generated demo app as resources.
+The demo bundles `Demo/sample.pdf` for quick parser checks on both platforms and also supports user-selected PDFs.
 
-The example uses bundle identifier `com.hoangbkit.pdfkit.demo`, development team `J458WW3452`, automatic signing, hardened runtime, and App Sandbox with read-only access to user-selected PDFs. It imports the package through a local Swift package dependency (`../..`), so the example always exercises the checkout being edited.
+The macOS demo uses bundle identifier `com.hoangbkit.pdfkit.demo`; the iOS demo uses `com.hoangbkit.pdfkit.demo.ios`. Both import the package through a local Swift package dependency (`..`), so the demo always exercises the checkout being edited.
 
 ## Current limitations
 
@@ -314,7 +314,7 @@ The analyzer is intentionally not a general document-understanding model. It can
 - deeply nested, merged-cell, or visually semantic tables that require structural understanding beyond repeated geometry
 - vertical writing systems; horizontal CJK is supported but vertical CJK remains outside the intended scope
 - malformed or unusual embedded text encodings where PDFKit itself cannot expose trustworthy text/geometry
-- scanned languages or scripts not supported by the Vision version on the target macOS release
+- scanned languages or scripts not supported by the Vision version on the target OS release
 - layouts whose geometry is too ambiguous to cross the conservative confidence/acceptance gates
 
 These cases keep the selected-text fallback permanently. The package does not silently drop sidebars/tables or force a low-confidence reconstructed order merely because layout mode is `.auto` or `.always`.
@@ -327,7 +327,7 @@ Run the package regression suite with:
 swift test
 ```
 
-Unit tests generate deterministic small PDFs at runtime. The layout suite includes a large positioned fixture matrix plus adversarial geometry and quality/performance gates. The standalone demo additionally keeps a few tiny checked-in PDFs under `Examples/Demo/TestFixtures` for manual testing. CI is started manually for a selected branch and runs a four-job matrix covering macOS 15 and macOS 26 on both Intel and Apple Silicon (`macos-15-intel`, `macos-15`, `macos-26-intel`, and `macos-26`). Every job runs the package tests, generates the XcodeGen example, builds it with code signing disabled, and verifies the demo fixtures are present in the built app bundle. The package and demo both require macOS 15 or later.
+Unit tests generate deterministic small PDFs at runtime. The layout suite includes a large positioned fixture matrix plus adversarial geometry and quality/performance gates. The shared demo bundles `Demo/sample.pdf` for manual checks. CI remains manually triggered: Fast CI runs package tests and builds both macOS and iOS Simulator demos; Full CI runs the macOS 15 Intel, macOS 15 Apple Silicon, and macOS 26 Apple Silicon matrix and additionally builds the iOS Simulator demo on the macOS 26 runner. The package supports macOS 15+ and iOS 26+.
 
 Layout diagnostics remain internal on purpose. Future problematic PDFs should be investigated through `PdfLayoutDiagnostics` snapshots rather than adding one-off production logging or widening the public API.
 
