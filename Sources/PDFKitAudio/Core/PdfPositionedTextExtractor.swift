@@ -46,6 +46,7 @@ enum PdfPositionedTextExtractor {
     static func nativeFragments(
         page: PDFPage,
         preservingSimpleOrder: Bool = false,
+        paragraphLines: (([PDFSelection]) -> Void)? = nil,
         diagnostics: ((ExtractionSnapshot) -> Void)? = nil
     ) -> [PdfLayoutFragment] {
         let characterCount = page.numberOfCharacters
@@ -55,6 +56,7 @@ enum PdfPositionedTextExtractor {
         }
 
         let lineSelections = selection.selectionsByLine()
+        paragraphLines?(lineSelections)
         if preservingSimpleOrder, diagnostics == nil, lineSelections.count >= 3,
            hasUnambiguousNativeOrder(lineSelections, page: page) {
             return []
@@ -149,19 +151,39 @@ enum PdfPositionedTextExtractor {
 
     /// The simple-order shortcut skips layout graphs, not paragraph whitespace.
     /// Only use selections whose text and geometry agree with the chosen source.
-    static func nativeTextPreservingParagraphs(_ text: String, page: PDFPage) -> String {
-        guard let selection = page.selection(for: NSRange(location: 0, length: page.numberOfCharacters)) else {
-            return text
+    static func nativeTextPreservingParagraphs(
+        _ text: String, page: PDFPage, lineSelections: [PDFSelection]? = nil
+    ) -> String {
+        let lines: [PDFSelection]
+        if let lineSelections {
+            lines = lineSelections
+        } else {
+            guard let selection = page.selection(for: NSRange(location: 0, length: page.numberOfCharacters)) else {
+                return text
+            }
+            lines = selection.selectionsByLine()
         }
-        let lines = selection.selectionsByLine()
         // Paragraph repair only inserts whitespace into exactly matching text;
         // it does not skip layout extraction or change source order. The strict
         // typographic-fit check belongs to the extraction shortcut above, not
         // here: ordinary font metric rounding can otherwise veto a whole page.
-        guard hasAlignedNativeOrder(lines, page: page) else { return text }
+        guard page.rotation == 0, lines.count >= 2,
+              lines.allSatisfy({ textRanges(in: $0, page: page).count == 1 }) else { return text }
+        let texts = lines.map { $0.string ?? "" }
+        let rects = lines.map { PdfLayoutGeometry.normalizedPageRect($0.bounds(for: page), page: page) }
+        guard PdfParagraphBoundaryClassifier.hasCoherentGeometry(rects) else { return text }
+        let direction = PdfLayoutLineBuilder.writingDirection(for: texts)
+        let edges = rects.map { direction == .rightToLeft ? $0.maxX : $0.minX }
+        let heights = rects.map(\.height).sorted()
+        let height = heights[(heights.count - 1) / 2]
+        let width = rects.map(\.width).max() ?? 0
+        // Permit bounded first-line indentation, not a jump to another column
+        // or an inset quotation. The extraction shortcut above stays unchanged.
+        guard (edges.max() ?? 0) - (edges.min() ?? 0) <= max(height * 2.5, width * 0.12) else {
+            return text
+        }
         return PdfParagraphText.restoringBoundaries(in: text,
-            lines: lines.map { $0.string ?? "" },
-            rects: lines.map { PdfLayoutGeometry.normalizedPageRect($0.bounds(for: page), page: page) })
+            lines: texts, rects: rects, writingDirection: direction)
     }
 
     private static func hasTightTypographicFit(_ selection: PDFSelection, page: PDFPage) -> Bool {
