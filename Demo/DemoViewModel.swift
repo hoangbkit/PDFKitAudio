@@ -137,6 +137,7 @@ final class DemoViewModel: ObservableObject {
                 guard loadGeneration == generation else { return }
                 errorMessage = error.localizedDescription
                 isParsing = false
+                releaseSecurityScopedURL()
             }
         }
     }
