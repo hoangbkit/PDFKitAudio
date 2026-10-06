@@ -201,6 +201,43 @@ final class PdfParagraphInferenceTests: XCTestCase {
         }
     }
 
+    func testTwoLineSubregionCannotInferParagraphsFromHeightAlone() {
+        let textLines = ["Centered title", "First body line.", "Second body line."]
+        let source = textLines.joined(separator: "\n")
+        let body = [CGRect(x: 0.15, y: 0.17, width: 0.30, height: 0.018),
+                    CGRect(x: 0.15, y: 0.27, width: 0.30, height: 0.018)]
+        // The centered title does not overlap the body lane. Its exclusion
+        // leaves two regularly spaced lines, without a local spacing baseline.
+        for title: CGRect in [.null, CGRect(x: 0.49, y: 0.07, width: 0.15, height: 0.026)] {
+            XCTAssertEqual(PdfParagraphText.restoringBoundaries(in: source,
+                lines: textLines, rects: [title] + body), source)
+        }
+        // Preserve the existing rule for a genuine standalone two-line input.
+        XCTAssertEqual(PdfParagraphText.restoringBoundaries(
+            in: textLines.suffix(2).joined(separator: "\n"),
+            lines: Array(textLines.suffix(2)), rects: body),
+            textLines.suffix(2).joined(separator: "\n\n"))
+    }
+
+    func testCenteredTitleAndTwoBodyLinesKeepTheNativeFastPathOutput() throws {
+        for name in ["short-chapter-heading-body", "full-width-title-body"] {
+            let fixture = try XCTUnwrap(TestLayoutFixtureCatalog.byName[name])
+            let data = try TestPDFBuilder.layoutPDF(fixture)
+            let document = try XCTUnwrap(PDFDocument(data: data))
+            let page = try XCTUnwrap(document.page(at: 0))
+            let raw = try XCTUnwrap(page.string?.trimmingCharacters(in: .whitespacesAndNewlines))
+            XCTAssertEqual(PdfPositionedTextExtractor.nativeTextPreservingParagraphs(raw, page: page),
+                raw, name)
+            let parser = PdfParser(configuration: .init(ocr: .init(mode: .never),
+                layout: .init(mode: .auto), cleanup: .minimal, extractCoverImage: false))
+            let book = try parser.parse(data: data)
+            let expectedText = PdfTextCleaner.cleanPage(raw, configuration: .minimal)
+            XCTAssertEqual(book.pages.first?.text, expectedText, name)
+            XCTAssertEqual(book.chapters.first?.plainText, expectedText, name)
+            XCTAssertEqual(book.allPlainText(), expectedText, name)
+        }
+    }
+
     func testHeadingAndCenteredFooterDoNotVetoBodyParagraphs() {
         let textLines = ["Original section heading"] + lines + ["7"]
         let geometry = [CGRect(x: 0.15, y: 0.04, width: 0.28, height: 0.026)]

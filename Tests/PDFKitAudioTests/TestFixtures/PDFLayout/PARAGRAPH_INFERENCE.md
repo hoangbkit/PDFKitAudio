@@ -25,4 +25,10 @@ The publisher's PDF page 14 (zero-based index 13, printed page 2, containing “
 
 The native fixture now has an optional heading and centered footer. Coverage exercises native repair directly and both final parser modes, alongside exact geometry cases for peripheral outliers and source-order column jumps. Unsafe geometry ends a consecutive local run; inference does not insert a boundary across that discontinuity. Non-newline content and existing source order remain unchanged.
 
-The updated regressions have not been run. The user's screenshot remains a failed acceptance result until the actual iOS output is checked.
+The user's screenshot remains a failed acceptance result until the actual iOS output is checked.
+
+## Sparse local spacing
+
+User-run Full CI on `873850d` passed the 19 paragraph-inference regressions on macOS 15 Intel, macOS 15 Apple Silicon, and macOS 26 Apple Silicon. The unchanged simple-page quality gate exposed an additional false positive: excluding a centered title left two body lines, and the standalone two-line absolute-gap rule misinterpreted their uniform wide spacing.
+
+That absolute-gap rule now applies only to a complete two-line input. A two-line subregion of a larger input abstains from spacing-only inference because it has no independent local spacing baseline. Added coverage includes exact geometry inputs and the two failing catalog fixtures through native repair, page output, chapter text, and whole-book text. The standalone two-line legacy contract remains covered. This follow-up has not been executed.

@@ -20,7 +20,7 @@ enum PdfParagraphBoundaryClassifier {
             let sizes = fontSizes.map { Array($0[range]) }
             let local = boundariesInRegion(lines: Array(lines[range]),
                 rects: Array(rects[range]), fontSizes: sizes,
-                writingDirection: writingDirection)
+                writingDirection: writingDirection, allowTwoLineGap: lines.count == 2)
             result.formUnion(local.map { $0 + start })
         }
         for index in rects.indices {
@@ -47,7 +47,7 @@ enum PdfParagraphBoundaryClassifier {
 
     private static func boundariesInRegion(
         lines: [String], rects: [CGRect], fontSizes: [CGFloat?]?,
-        writingDirection: PdfLayoutWritingDirection
+        writingDirection: PdfLayoutWritingDirection, allowTwoLineGap: Bool
     ) -> Set<Int> {
         let height = lowerMedian(rects.map(\.height))
         let steps = (1..<rects.count).map { rects[$0].minY - rects[$0 - 1].minY }
@@ -95,11 +95,16 @@ enum PdfParagraphBoundaryClassifier {
             let step = steps[index - 1]
             let strongGap: Bool
             if lines.count == 2 {
-                strongGap = rects[index].minY - rects[index - 1].maxY > height * 1.5
+                // A two-line input has no measured spacing baseline, so retain
+                // its legacy absolute-gap rule. A two-line run carved out of a
+                // larger input has lost that context: uniform wide spacing must
+                // not become a paragraph just because a title was excluded.
+                strongGap = allowTwoLineGap
+                    && rects[index].minY - rects[index - 1].maxY > height * 1.5
             } else {
                 strongGap = step > typicalStep * 1.5 && step - typicalStep > height * 0.5
             }
-            // Preserve the existing strong gap rule independently of prose cues.
+            // Use supported gap evidence independently of prose cues.
             if strongGap {
                 result.insert(index)
                 continue
