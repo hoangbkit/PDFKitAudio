@@ -1,4 +1,9 @@
+#if canImport(AppKit)
 import AppKit
+#elseif canImport(UIKit)
+import UIKit
+#endif
+
 import CoreText
 import Foundation
 import PDFKit
@@ -561,12 +566,11 @@ enum PdfPositionedTextExtractor {
             in: NSRange(location: 0, length: attributedString.length),
             options: []
         ) { value, _, _ in
-            guard let font = value as? NSFont else { return }
+            guard let hints = platformFontHints(from: value) else { return }
             sawFont = true
-            sizes.append(font.pointSize)
-            let traits = font.fontDescriptor.symbolicTraits
-            sawBold = sawBold || traits.contains(.bold)
-            sawItalic = sawItalic || traits.contains(.italic)
+            sizes.append(hints.size)
+            sawBold = sawBold || hints.isBold
+            sawItalic = sawItalic || hints.isItalic
         }
 
         guard sawFont else { return nil }
@@ -577,6 +581,28 @@ enum PdfPositionedTextExtractor {
             isBold: sawBold,
             isItalic: sawItalic
         )
+    }
+
+    private static func platformFontHints(
+        from value: Any?
+    ) -> (size: CGFloat, isBold: Bool, isItalic: Bool)? {
+#if canImport(AppKit)
+        guard let font = value as? NSFont else { return nil }
+        let traits = font.fontDescriptor.symbolicTraits
+        return (
+            size: font.pointSize,
+            isBold: traits.contains(.bold),
+            isItalic: traits.contains(.italic)
+        )
+#elseif canImport(UIKit)
+        guard let font = value as? UIFont else { return nil }
+        let traits = font.fontDescriptor.symbolicTraits
+        return (
+            size: font.pointSize,
+            isBold: traits.contains(.traitBold),
+            isItalic: traits.contains(.traitItalic)
+        )
+#endif
     }
 }
 
