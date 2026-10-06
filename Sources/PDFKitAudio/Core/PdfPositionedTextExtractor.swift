@@ -167,23 +167,22 @@ enum PdfPositionedTextExtractor {
         // it does not skip layout extraction or change source order. The strict
         // typographic-fit check belongs to the extraction shortcut above, not
         // here: ordinary font metric rounding can otherwise veto a whole page.
-        guard page.rotation == 0, lines.count >= 2,
-              lines.allSatisfy({ textRanges(in: $0, page: page).count == 1 }) else { return text }
+        guard page.rotation == 0, lines.count >= 2 else { return text }
         let texts = lines.map { $0.string ?? "" }
-        let rects = lines.map { PdfLayoutGeometry.normalizedPageRect($0.bounds(for: page), page: page) }
-        guard PdfParagraphBoundaryClassifier.hasCoherentGeometry(rects) else { return text }
-        let direction = PdfLayoutLineBuilder.writingDirection(for: texts)
-        let edges = rects.map { direction == .rightToLeft ? $0.maxX : $0.minX }
-        let heights = rects.map(\.height).sorted()
-        let height = heights[(heights.count - 1) / 2]
-        let width = rects.map(\.width).max() ?? 0
-        // Permit bounded first-line indentation, not a jump to another column
-        // or an inset quotation. The extraction shortcut above stays unchanged.
-        guard (edges.max() ?? 0) - (edges.min() ?? 0) <= max(height * 2.5, width * 0.12) else {
-            return text
+        let rects = lines.map { selection -> CGRect in
+            // A disjoint selection can span unrelated regions. It is a local
+            // barrier, not a reason to discard good geometry elsewhere.
+            guard textRanges(in: selection, page: page).count == 1 else { return .null }
+            return PdfLayoutGeometry.normalizedPageRect(selection.bounds(for: page), page: page)
         }
+        let direction = PdfLayoutLineBuilder.writingDirection(for: texts)
+        // A heading, inset quotation or centered footer does not share the body
+        // margin. The classifier checks consecutive regions; a page-wide edge
+        // spread would reject ordinary book pages before inspecting their prose.
         return PdfParagraphText.restoringBoundaries(in: text,
-            lines: texts, rects: rects, writingDirection: direction)
+            lines: texts, rects: rects,
+            fontSizes: lines.map { styleHints(from: $0.attributedString)?.fontSize },
+            writingDirection: direction)
     }
 
     private static func hasTightTypographicFit(_ selection: PDFSelection, page: PDFPage) -> Bool {

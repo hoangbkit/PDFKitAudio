@@ -201,6 +201,70 @@ final class PdfParagraphInferenceTests: XCTestCase {
         }
     }
 
+    func testHeadingAndCenteredFooterDoNotVetoBodyParagraphs() {
+        let textLines = ["Original section heading"] + lines + ["7"]
+        let geometry = [CGRect(x: 0.15, y: 0.04, width: 0.28, height: 0.026)]
+            + rects() + [CGRect(x: 0.49, y: 0.92, width: 0.015, height: 0.018)]
+        let source = textLines.joined(separator: "\n")
+        let expectedText = "Original section heading\n\n" + expected + "\n7"
+        let repaired = PdfParagraphText.restoringBoundaries(in: source,
+            lines: textLines, rects: geometry)
+        XCTAssertEqual(repaired, expectedText)
+        XCTAssertEqual(PdfParagraphText.restoringBoundaries(in: repaired,
+            lines: textLines, rects: geometry), expectedText)
+    }
+
+    func testUnsafePeripheralGeometryDoesNotDisableASeparateBodyRun() {
+        for peripheral: CGRect in [.null, CGRect(x: 0.9, y: 0.04, width: 0.1, height: 0.018)] {
+            let textLines = ["Running header"] + lines
+            let source = textLines.joined(separator: "\n")
+            XCTAssertEqual(PdfParagraphText.restoringBoundaries(in: source,
+                lines: textLines, rects: [peripheral] + rects()),
+                "Running header\n" + expected)
+        }
+    }
+
+    func testSeparateColumnRunsRetainSourceOrderAndDoNotSplitAcrossTheJump() {
+        let left = rects().map {
+            CGRect(x: $0.minX * 0.45, y: $0.minY,
+                width: $0.width * 0.45, height: $0.height * 0.45)
+        }
+        let right = left.map {
+            CGRect(x: $0.minX + 0.5, y: $0.minY, width: $0.width, height: $0.height)
+        }
+        let textLines = lines + lines
+        let source = textLines.joined(separator: "\n")
+        XCTAssertEqual(PdfParagraphText.restoringBoundaries(in: source,
+            lines: textLines, rects: left + right), expected + "\n" + expected)
+    }
+
+    func testGeneratedBookPageWithHeadingAndCenteredFooterThroughNativeRepair() async throws {
+        let data = try nativeFixture(includeRunningMatter: true)
+        let document = try XCTUnwrap(PDFDocument(data: data))
+        let page = try XCTUnwrap(document.page(at: 0))
+        let raw = try XCTUnwrap(page.string?.trimmingCharacters(in: .whitespacesAndNewlines))
+        // The old whole-page edge-spread gate rejected this page because the
+        // centered footer is far from the body margin.
+        let repaired = PdfPositionedTextExtractor.nativeTextPreservingParagraphs(raw, page: page)
+        XCTAssertTrue(repaired.contains(expected))
+        XCTAssertEqual(repaired.utf8.filter { $0 != 0x0A && $0 != 0x0D },
+            raw.utf8.filter { $0 != 0x0A && $0 != 0x0D })
+        XCTAssertEqual(PdfPositionedTextExtractor.nativeTextPreservingParagraphs(repaired, page: page), repaired)
+        for mode: PdfLayoutMode in [.auto, .always] {
+            let parser = PdfParser(configuration: .init(ocr: .init(mode: .never),
+                layout: .init(mode: mode), cleanup: .minimal, extractCoverImage: false))
+            let book = try parser.parse(data: data)
+            XCTAssertTrue(book.pages.first?.text.contains(expected) == true)
+            XCTAssertTrue(book.chapters.first?.plainText.contains(expected) == true)
+            XCTAssertTrue(book.allPlainText().contains(expected))
+            let repeated = try await parser.parseAsync(data: data)
+            XCTAssertEqual(repeated.pages, book.pages)
+        }
+        let legacy = try PdfParser(configuration: .init(ocr: .init(mode: .never),
+            layout: .init(mode: .never), cleanup: .minimal, extractCoverImage: false)).parse(data: data)
+        XCTAssertEqual(legacy.pages.first?.text, PdfTextCleaner.cleanPage(raw, configuration: .minimal))
+    }
+
     func testGeneratedIndentedPDFThroughNativeRepairAndFinalParserModes() async throws {
         let data = try nativeFixture()
         let document = try XCTUnwrap(PDFDocument(data: data))
@@ -256,11 +320,17 @@ final class PdfParagraphInferenceTests: XCTestCase {
             rect: geometry.dropFirst().reduce(geometry[0]) { $0.union($1) }, sourceOrder: id)
     }
 
-    private func nativeFixture() throws -> Data {
-        let boxes = lines.enumerated().map { index, text in
+    private func nativeFixture(includeRunningMatter: Bool = false) throws -> Data {
+        var boxes = lines.enumerated().map { index, text in
             TestLayoutTextBox("line-\(index)", text: text,
                 x: 0.15 + ([3, 7].contains(index) ? 0.022 : 0),
                 y: 0.1 + CGFloat(index) * 0.025, width: 0.75, height: 0.022, fontSize: 12)
+        }
+        if includeRunningMatter {
+            boxes.insert(TestLayoutTextBox("heading", text: "Original section heading",
+                x: 0.15, y: 0.04, width: 0.6, height: 0.032, fontSize: 18), at: 0)
+            boxes.append(TestLayoutTextBox("footer", text: "7",
+                x: 0.49, y: 0.92, width: 0.03, height: 0.022, fontSize: 12))
         }
         return try TestPDFBuilder.layoutPDF(.init(name: "uniform-spacing-first-line-indents",
             category: "simple", support: .supported, pages: [.init(boxes: boxes)],

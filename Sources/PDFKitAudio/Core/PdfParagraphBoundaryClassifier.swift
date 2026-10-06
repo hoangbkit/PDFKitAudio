@@ -7,9 +7,48 @@ enum PdfParagraphBoundaryClassifier {
         writingDirection: PdfLayoutWritingDirection = .leftToRight
     ) -> Set<Int> {
         guard lines.count >= 2, lines.count == rects.count,
-              fontSizes == nil || fontSizes?.count == lines.count,
-              hasCoherentGeometry(rects) else { return [] }
+              fontSizes == nil || fontSizes?.count == lines.count else { return [] }
 
+        // Source order stays fixed. An unsafe line or a jump to a different
+        // region stops the local run instead of vetoing every paragraph on a
+        // page. Never infer a boundary across such a discontinuity.
+        var result: Set<Int> = []
+        var start = 0
+        func classifyRun(endingAt end: Int) {
+            guard end - start >= 2 else { return }
+            let range = start..<end
+            let sizes = fontSizes.map { Array($0[range]) }
+            let local = boundariesInRegion(lines: Array(lines[range]),
+                rects: Array(rects[range]), fontSizes: sizes,
+                writingDirection: writingDirection)
+            result.formUnion(local.map { $0 + start })
+        }
+        for index in rects.indices {
+            if !isValidRect(rects[index]) {
+                classifyRun(endingAt: index)
+                start = index + 1
+            } else if index > start,
+                      !hasCoherentGeometry([rects[index - 1], rects[index]]) {
+                classifyRun(endingAt: index)
+                let previous = rects[index - 1], current = rects[index]
+                let overlap = min(previous.maxX, current.maxX) - max(previous.minX, current.minX)
+                let jitter = max(0.001, min(previous.height, current.height) * 0.12)
+                let overlapsSameLane = overlap >= min(previous.width, current.width) * 0.5
+                    && current.minY < previous.maxY - jitter
+                    && current.maxY > previous.minY + jitter
+                // Do not turn an overlapping duplicate/bad line into the start
+                // of a run with an artificial large gap to its next line.
+                start = overlapsSameLane ? index + 1 : index
+            }
+        }
+        classifyRun(endingAt: lines.count)
+        return result
+    }
+
+    private static func boundariesInRegion(
+        lines: [String], rects: [CGRect], fontSizes: [CGFloat?]?,
+        writingDirection: PdfLayoutWritingDirection
+    ) -> Set<Int> {
         let height = lowerMedian(rects.map(\.height))
         let steps = (1..<rects.count).map { rects[$0].minY - rects[$0 - 1].minY }
         let typicalStep = lowerMedian(steps)
@@ -101,13 +140,14 @@ enum PdfParagraphBoundaryClassifier {
         return result
     }
 
-    /// Native callers additionally guard rotation, disjoint ranges and edge spread.
+    private static func isValidRect(_ rect: CGRect) -> Bool {
+        !rect.isNull && rect.minX.isFinite && rect.minY.isFinite
+            && rect.width.isFinite && rect.height.isFinite && rect.width > 0 && rect.height > 0
+    }
+
+    /// Checks a consecutive source-order run, never an entire mixed page.
     static func hasCoherentGeometry(_ rects: [CGRect]) -> Bool {
-        guard rects.count >= 2,
-              rects.allSatisfy({ !$0.isNull && $0.minX.isFinite && $0.minY.isFinite
-                  && $0.width.isFinite && $0.height.isFinite && $0.width > 0 && $0.height > 0 }) else {
-            return false
-        }
+        guard rects.count >= 2, rects.allSatisfy(isValidRect) else { return false }
         for index in 1..<rects.count {
             let previous = rects[index - 1], current = rects[index]
             let overlap = min(previous.maxX, current.maxX) - max(previous.minX, current.minX)
