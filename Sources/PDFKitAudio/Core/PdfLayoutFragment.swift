@@ -1,4 +1,4 @@
-import AppKit
+import CoreGraphics
 import Foundation
 
 /// Internal positioned text unit shared by native PDFKit extraction and Vision OCR.
