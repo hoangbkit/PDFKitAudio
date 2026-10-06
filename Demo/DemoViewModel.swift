@@ -1,5 +1,7 @@
+import Combine
 import Foundation
 import PDFKitAudio
+import UniformTypeIdentifiers
 
 #if os(macOS)
 import AppKit
