@@ -1,3 +1,4 @@
+import Foundation
 import PDFKit
 import PDFKitAudio
 import SwiftUI
