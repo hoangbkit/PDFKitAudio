@@ -123,6 +123,8 @@ struct ContentView: View {
             Group {
                 if let book = model.book {
                     iOSDocumentView(book)
+                } else if model.isParsing {
+                    iOSParsingView
                 } else {
                     emptyState
                 }
@@ -171,6 +173,31 @@ struct ContentView: View {
         } message: {
             Text(model.errorMessage ?? "")
         }
+    }
+
+    private var iOSParsingView: some View {
+        VStack(spacing: 16) {
+            ProgressView()
+                .controlSize(.large)
+
+            VStack(spacing: 6) {
+                Text(model.title)
+                    .font(.headline)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+
+                Text(model.progressLabel)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let fraction = model.progress?.pageFractionCompleted {
+                ProgressView(value: fraction)
+                    .frame(maxWidth: 280)
+            }
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func iOSDocumentView(_ book: PdfBook) -> some View {
