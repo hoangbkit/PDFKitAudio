@@ -28,9 +28,15 @@ struct ContentView: View {
         .toolbar {
             ToolbarItemGroup {
                 Button {
+                    model.loadSamplePDF()
+                } label: {
+                    Label("Use Sample PDF", systemImage: "doc.badge.gearshape")
+                }
+
+                Button {
                     openPDF()
                 } label: {
-                    Label("Open PDF", systemImage: "doc")
+                    Label("Pick PDF File", systemImage: "folder")
                 }
 
                 Picker("OCR", selection: $model.ocrMode) {
